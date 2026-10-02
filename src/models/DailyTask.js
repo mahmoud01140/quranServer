@@ -18,7 +18,7 @@ const quranPortionSchema = new mongoose.Schema({
 
 const dailyTaskSchema = new mongoose.Schema({
   student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  group:   { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true },
+  group:   { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: false },
   date:    { type: Date, default: Date.now },
 
   // Pillar 1: New Memorization (الحفظ الجديد - السبق)

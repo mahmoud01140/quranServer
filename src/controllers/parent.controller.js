@@ -1,8 +1,6 @@
 import User from '../models/User.js';
-import DailyRecord from '../models/DailyRecord.js';
 import ExamResult from '../models/ExamResult.js';
 import LiveSession from '../models/LiveSession.js';
-import SessionFeedback from '../models/SessionFeedback.js';
 
 // GET /api/parents/children
 export const getChildren = async (req, res) => {
@@ -125,27 +123,13 @@ export const getChildProgress = async (req, res) => {
       return res.status(404).json({ message: 'الطالب غير موجود' });
     }
 
-    // 1. Weekly memorization/review stats (past 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    // 1. Weekly stats (daily records feature deleted → zeros, shape kept)
+    const weeklyRecords = [];
+    const totalVersesMemorized = 0;
+    const totalVersesReviewed = 0;
 
-    const weeklyRecords = await DailyRecord.find({
-      student: id,
-      date: { $gte: sevenDaysAgo }
-    }).sort({ date: -1 });
-
-    const totalVersesMemorized = weeklyRecords
-      .filter(r => r.activityType === 'memorization' && r.status === 'approved')
-      .reduce((sum, r) => sum + (r.versesCount || 0), 0);
-
-    const totalVersesReviewed = weeklyRecords
-      .filter(r => r.activityType === 'review' && r.status === 'approved')
-      .reduce((sum, r) => sum + (r.versesCount || 0), 0);
-
-    // Get last 15 records for the progress list
-    const recentRecords = await DailyRecord.find({ student: id })
-      .sort({ date: -1 })
-      .limit(15);
+    // Last records list (feature deleted → empty, shape kept)
+    const recentRecords = [];
 
     // 2. Attendance reports & Today's session status
     let attendanceRate = 100;
@@ -237,40 +221,8 @@ export const getChildProgress = async (req, res) => {
       .populate('reviewedBy', 'firstName lastName')
       .sort({ submittedAt: -1 });
 
-    // 3.5 Homework details
-    let homeworkDetails = [];
-    if (student.group) {
-      const homeworkSessions = await LiveSession.find({
-        group: student.group._id,
-        homework: { $exists: true, $ne: '' }
-      }).sort({ scheduledAt: -1 }).limit(15);
-
-      homeworkDetails = homeworkSessions.map(session => {
-        const submission = session.homeworkSubmissions?.find(
-          sub => sub.student?.toString() === id
-        );
-        const submitted = !!submission;
-        const overdue = session.homeworkDeadline && new Date(session.homeworkDeadline) < new Date() && !submitted;
-
-        return {
-          sessionId: session._id,
-          title: session.title,
-          homework: session.homework,
-          quranHomework: session.quranHomework,
-          deadline: session.homeworkDeadline,
-          submitted,
-          submittedAt: submission?.submittedAt,
-          notes: submission?.notes,
-          audioUrl: submission?.audioUrl,
-          files: submission?.files,
-          isChecked: submission?.isChecked,
-          teacherFeedback: submission?.teacherFeedback,
-          rating: submission?.rating,
-          earnedPoints: submission?.earnedPoints,
-          overdue
-        };
-      });
-    }
+    // 3.5 Homework: محذوف نهائياً من النظام — يعتمد على الامتحانات فقط
+    const homeworkDetails = [];
 
     // 4. Low Performance Alerts
     const alerts = [];
@@ -296,28 +248,7 @@ export const getChildProgress = async (req, res) => {
       });
     });
 
-    // Alert: Low attention feedback from teachers
-    const recentFeedbacks = await SessionFeedback.find({ student: id })
-      .sort({ sessionDate: -1 })
-      .limit(3);
-
-    const lowRatingsFeedback = recentFeedbacks.filter(
-      fb => fb.attentionRating <= 2 || fb.recitationRating <= 2 || fb.memorizationRating <= 2
-    );
-
-    lowRatingsFeedback.forEach(fb => {
-      let reasons = [];
-      if (fb.attentionRating <= 2) reasons.push('انتباه وتركيز منخفض');
-      if (fb.recitationRating <= 2) reasons.push('أداء تلاوة ضعيف');
-      if (fb.memorizationRating <= 2) reasons.push('مستوى حفظ يحتاج لمراجعة مكثفة');
-
-      alerts.push({
-        type: 'feedback',
-        severity: 'warning',
-        title: 'ملاحظة انتباه وأداء من المعلم 👨‍🏫',
-        message: `سجل المعلم ملاحظات سلبية في حلقة تاريخ ${new Date(fb.sessionDate).toLocaleDateString('ar-EG')}: ${reasons.join('، ')}. الملاحظة: "${fb.generalNotes || 'لا توجد ملاحظات مكتوبة'}"`
-      });
-    });
+    // Alert: session feedback removed with the feature (no-op)
 
     res.json({
       student: {

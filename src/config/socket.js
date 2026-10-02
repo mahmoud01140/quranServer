@@ -164,20 +164,55 @@ export const initSocket = (io) => {
       } catch {}
     });
 
+    // ─── Session Rooms (for individual 1-on-1 and direct sessions) ──
+    socket.on('join-session-room', async ({ sessionId }) => {
+      if (!sessionId) return;
+      if (!requireAuth()) return;
+      try {
+        const session = await LiveSession.findById(sessionId).select('teacher student group');
+        if (!session) return socket.emit('error', { message: 'الجلسة غير موجودة' });
+        const user = await User.findById(socket.userId).select('role');
+        const isTeacher = session.teacher?.toString() === socket.userId;
+        const isStudent = session.student?.toString() === socket.userId;
+        const isAdmin = user?.role === 'admin';
+        if (!isTeacher && !isStudent && !isAdmin) {
+          return socket.emit('error', { message: 'غير مصرح لك بدخول هذه الجلسة' });
+        }
+        socket.join(`session:${sessionId}`);
+        socket.emit('session-room-joined', { sessionId });
+      } catch (err) {
+        console.error('join-session-room error:', err.message);
+      }
+    });
+
+    socket.on('leave-session-room', ({ sessionId }) => {
+      if (sessionId) socket.leave(`session:${sessionId}`);
+    });
+
     // ─── Chat ─────────────────────────────────────────────────────
     const handleChatMessage = async ({ sessionId, groupId, message, type, senderName }) => {
       if (!requireAuth()) return;
-      if (!message || !groupId) return;
+      if (!message || (!groupId && !sessionId)) return;
 
       // Verify membership
       try {
-        const group = await Group.findById(groupId).select('teacher students');
-        const user = await User.findById(socket.userId).select('role');
-        if (!group) return;
-        const isTeacher = group.teacher?.toString() === socket.userId;
-        const isStudent = group.students.some(s => s.toString() === socket.userId);
-        const isAdmin = user?.role === 'admin';
-        if (!isTeacher && !isStudent && !isAdmin) return;
+        if (groupId) {
+          const group = await Group.findById(groupId).select('teacher students');
+          const user = await User.findById(socket.userId).select('role');
+          if (!group) return;
+          const isTeacher = group.teacher?.toString() === socket.userId;
+          const isStudent = group.students.some(s => s.toString() === socket.userId);
+          const isAdmin = user?.role === 'admin';
+          if (!isTeacher && !isStudent && !isAdmin) return;
+        } else if (sessionId) {
+          const session = await LiveSession.findById(sessionId).select('teacher student group');
+          if (!session) return;
+          const user = await User.findById(socket.userId).select('role');
+          const isTeacher = session.teacher?.toString() === socket.userId;
+          const isStudent = session.student?.toString() === socket.userId;
+          const isAdmin = user?.role === 'admin';
+          if (!isTeacher && !isStudent && !isAdmin) return;
+        }
       } catch {
         return;
       }
@@ -188,13 +223,19 @@ export const initSocket = (io) => {
       const chatMsg = {
         sender: socket.userId,
         senderId: socket.userId,
-        senderName: senderName || 'مجهول',
+        senderName: senderName || 'مستخدم',
         message: sanitizedMessage,
         type: type || 'text',
         sentAt: new Date(),
         socketId: socket.id,
       };
-      io.to(`group:${groupId}`).emit('live-message', chatMsg);
+
+      if (groupId) {
+        io.to(`group:${groupId}`).emit('live-message', chatMsg);
+      }
+      if (sessionId) {
+        io.to(`session:${sessionId}`).emit('live-message', chatMsg);
+      }
 
       // Persist to DB (cap at 500 messages to prevent unbounded document growth)
       if (sessionId) {

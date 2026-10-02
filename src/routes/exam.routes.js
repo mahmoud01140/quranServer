@@ -42,7 +42,7 @@ router.put('/:id', teacherOnly, updateExam);
 router.delete('/:id', teacherOnly, deleteExam);                        // Admin + Teacher can delete
 
 // ── Results for specific exam ─────────────────────────────────────
-router.get('/:examId/results', getExamResults);           // Admin sees results per exam
+router.get('/:examId/results', teacherOnly, getExamResults);           // Admin sees results per exam
 
 // ── Submissions ───────────────────────────────────────────────────
 router.post('/:id/submit', submitExam);

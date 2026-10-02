@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Exam from '../models/Exam.js';
 import ExamResult from '../models/ExamResult.js';
 import User from '../models/User.js';
@@ -50,6 +51,10 @@ export const getPlacementExam = async (req, res) => {
 // GET /api/exams/group/:groupId
 export const getGroupExams = async (req, res) => {
   try {
+    // حارس: معرف غير صالح (مثل 'none' للطلاب بلا مجموعة) → قائمة فارغة بدل انفجار 500
+    if (!mongoose.Types.ObjectId.isValid(req.params.groupId)) {
+      return res.json({ exams: [] });
+    }
     const exams = await Exam.find({ group: req.params.groupId, isActive: true })
       .populate('createdBy', 'firstName lastName')
       .sort({ createdAt: -1 });
@@ -462,6 +467,16 @@ const notifyStaffOfPendingReview = async (req, { studentId, examId, examTitle, i
       const g = await Group.findById(student.group).select('teacher');
       teacherId = g?.teacher;
     }
+    // النظام فردي: معلم آخر جلسة مباشرة للطالب
+    if (!teacherId) {
+      try {
+        const LiveSession = (await import('../models/LiveSession.js')).default;
+        const lastSession = await LiveSession.findOne({ student: studentId })
+          .sort({ startedAt: -1, createdAt: -1 })
+          .select('teacher');
+        teacherId = lastSession?.teacher || null;
+      } catch (_) {}
+    }
     const admins = await User.find({ role: 'admin' }).select('_id');
     const title = isPlacement
       ? '🎙️ تسجيلات تحديد شفهي بانتظار المراجعة'
@@ -503,6 +518,11 @@ export const submitOralExam = async (req, res) => {
         exam: req.params.id,
         student: req.user._id,
       });
+    }
+
+    // منع التسليم الفارغ: لا ملفات جديدة ولا تسجيلات سابقة
+    if (!oralRecordings.length && !(result?.oralRecordings?.length)) {
+      return res.status(400).json({ message: 'سجل مقطعاً صوتياً واحداً على الأقل قبل التسليم' });
     }
 
     if (result) {
@@ -563,6 +583,11 @@ export const submitRecitationAnswers = async (req, res) => {
 
     let result;
     if (examResultId) {
+      result = await ExamResult.findById(examResultId);
+      // منع التسليم الفارغ
+      if (!oralRecordings.length && !(result?.oralRecordings?.length)) {
+        return res.status(400).json({ message: 'سجل مقطعاً صوتياً واحداً على الأقل قبل التسليم' });
+      }
       result = await ExamResult.findByIdAndUpdate(
         examResultId,
         {
@@ -573,6 +598,9 @@ export const submitRecitationAnswers = async (req, res) => {
       );
     } else {
       // Create a new result if it doesn't exist yet
+      if (!oralRecordings.length) {
+        return res.status(400).json({ message: 'سجل مقطعاً صوتياً واحداً على الأقل قبل التسليم' });
+      }
       result = await ExamResult.create({
         exam: exam._id,
         student: req.user._id,
@@ -599,6 +627,14 @@ export const submitRecitationAnswers = async (req, res) => {
 // GET /api/exams/results/student/:id
 export const getStudentResults = async (req, res) => {
   try {
+    const targetId = req.params.id;
+    const me = req.user._id.toString();
+    const isStaff = ['admin', 'teacher'].includes(req.user.role);
+    const isSelf = me === targetId;
+    const isParent = req.user.role === 'parent' && (req.user.children || []).some(c => c.toString() === targetId);
+    if (!isSelf && !isStaff && !isParent) {
+      return res.status(403).json({ message: 'غير مصرح لك بعرض نتائج هذا الطالب' });
+    }
     const results = await ExamResult.find({ student: req.params.id })
       .populate('exam', 'title type level lessonTitle lessonId group')
       .populate('reviewedBy', 'firstName lastName')
@@ -617,6 +653,14 @@ export const getResultById = async (req, res) => {
       .populate('student', 'firstName lastName')
       .populate('reviewedBy', 'firstName lastName');
     if (!result) return res.status(404).json({ message: 'النتيجة غير موجودة' });
+    const ownerId = (result.student?._id || result.student)?.toString();
+    const me = req.user._id.toString();
+    const isStaff = ['admin', 'teacher'].includes(req.user.role);
+    const isSelf = me === ownerId;
+    const isParent = req.user.role === 'parent' && (req.user.children || []).some(c => c.toString() === ownerId);
+    if (!isSelf && !isStaff && !isParent) {
+      return res.status(403).json({ message: 'غير مصرح لك بعرض هذه النتيجة' });
+    }
     res.json({ result });
   } catch (error) {
     res.status(500).json({ message: 'خطأ' });
@@ -658,7 +702,7 @@ export const getExamResults = async (req, res) => {
 // PUT /api/exams/results/:resultId/review  (teacher / admin reviews oral)
 export const reviewOralResult = async (req, res) => {
   try {
-    const { teacherNotes, oralScore, teacherAudioUrl, flaggedVerses, assignedLevel, isApproved } = req.body;
+    const { teacherNotes, oralScore, teacherAudioUrl, flaggedVerses, assignedLevel, isApproved, scheduleDays, sessionTime } = req.body;
 
     // Fetch existing result first to get writtenScore
     const existing = await ExamResult.findById(req.params.resultId).populate('exam', 'passingScore totalPoints type');
@@ -704,7 +748,14 @@ export const reviewOralResult = async (req, res) => {
       levelChanged = true;
     }
 
-    if (isApproved === true) {
+    if (Array.isArray(scheduleDays)) {
+      userUpdates.scheduleDays = scheduleDays;
+    }
+    if (sessionTime) {
+      userUpdates.sessionTime = sessionTime;
+    }
+
+    if (isApproved === true || (assignedLevel && scheduleDays?.length)) {
       userUpdates.isApproved = true;
       result.student.isApproved = true;
     }
@@ -803,18 +854,20 @@ export const getPendingReviews = async (req, res) => {
   try {
     const filter = {
       status: { $in: ['pending_oral_review', 'submitted'] },
-      'oralRecordings.0': { $exists: true },
       $or: [
         { reviewedAt: { $exists: false } },
         { reviewedAt: null },
       ],
     };
     // Teachers only see their own groups' students; admins see everything.
+    // In the individual system teachers have no groups → see all pending.
     if (req.user.role === 'teacher') {
       const teacherId = req.query.teacherId || req.user._id;
       const myGroups = await Group.find({ teacher: teacherId }).select('_id');
-      const myStudentIds = await User.find({ group: { $in: myGroups.map(g => g._id) } }).select('_id');
-      filter.student = { $in: myStudentIds.map(s => s._id) };
+      if (myGroups.length) {
+        const myStudentIds = await User.find({ group: { $in: myGroups.map(g => g._id) } }).select('_id');
+        filter.student = { $in: myStudentIds.map(s => s._id) };
+      }
     }
     const results = await ExamResult.find(filter)
       .populate('student', 'firstName lastName avatar group assignedLevel isApproved email phone registrationType')

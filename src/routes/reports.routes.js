@@ -1,5 +1,5 @@
 import express from 'express';
-import { getAnalyticsStats, getAttendanceReports } from '../controllers/reports.controller.js';
+import { getAnalyticsStats, getAttendanceReports, getStudentReport } from '../controllers/reports.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
@@ -14,5 +14,6 @@ const allowAdminOrTeacher = (req, res, next) => {
 
 router.get('/analytics', allowAdminOrTeacher, getAnalyticsStats);
 router.get('/attendance', allowAdminOrTeacher, getAttendanceReports);
+router.get('/student/:studentId', allowAdminOrTeacher, getStudentReport);
 
 export default router;

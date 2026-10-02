@@ -1,6 +1,8 @@
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Group from '../models/Group.js';
 import LiveSession from '../models/LiveSession.js';
+import ExamResult from '../models/ExamResult.js';
 
 // GET /api/reports/analytics — admin only
 export const getAnalyticsStats = async (req, res) => {
@@ -289,5 +291,118 @@ export const getAttendanceReports = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في جلب تقرير الحضور والغياب' });
+  }
+};
+
+// ─── تقرير الطالب الشامل (قابل للتوسع) ─────────────────────────────
+// GET /api/reports/student/:studentId — admin & teacher
+// البنية sections: كل مفتاح قسم مستقل (attendance, exams, ...).
+// لإضافة بيانات مستقبلاً (دروس، مدفوعات، ورد...) أضف مفتاحاً جديداً هنا
+// وRenderer مقابله في الواجهة — دون كسر المستهلكين الحاليين.
+export const getStudentReport = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(404).json({ message: 'الطالب غير موجود' });
+    }
+
+    const student = await User.findById(studentId)
+      .select('firstName lastName email phone country avatar role assignedLevel scheduleDays sessionTime isApproved isActive createdAt placementExamScore')
+      .populate('group', 'name level');
+    if (!student || student.role !== 'student') {
+      return res.status(404).json({ message: 'الطالب غير موجود' });
+    }
+    const sid = student._id.toString();
+
+    const sections = {};
+
+    // ——— قسم الحضور ———
+    const sessionOr = [{ student: student._id }];
+    const groupId = student.group?._id || student.group;
+    if (groupId) sessionOr.push({ group: groupId });
+    const sessions = await LiveSession.find({
+      status: { $in: ['live', 'ended'] },
+      $or: sessionOr,
+    })
+      .select('title status startedAt scheduledAt createdAt group student attendees attendanceRecords teacher')
+      .populate('teacher', 'firstName lastName')
+      .sort({ startedAt: -1, createdAt: -1 });
+
+    const attendanceHistory = sessions.map(s => {
+      const rec = (s.attendanceRecords || []).find(
+        r => (r.student?._id || r.student)?.toString() === sid
+      );
+      const joined = (s.attendees || []).some(
+        a => (a.student?._id || a.student)?.toString() === sid
+      );
+      const status = rec?.status || (joined ? 'present' : (s.status === 'ended' ? 'absent' : 'scheduled'));
+      return {
+        sessionId: s._id,
+        title: s.title || 'حصة مباشرة',
+        date: s.startedAt || s.scheduledAt || s.createdAt,
+        sessionStatus: s.status,
+        status,
+        teacherName: s.teacher ? `${s.teacher.firstName || ''} ${s.teacher.lastName || ''}`.trim() : '',
+        notes: rec?.notes || '',
+      };
+    });
+    const endedHistory = attendanceHistory.filter(h => h.sessionStatus === 'ended');
+    const attendedCount = endedHistory.filter(h => ['present', 'late', 'excused'].includes(h.status)).length;
+    sections.attendance = {
+      total: endedHistory.length,
+      present: endedHistory.filter(h => h.status === 'present').length,
+      late: endedHistory.filter(h => h.status === 'late').length,
+      absent: endedHistory.filter(h => h.status === 'absent').length,
+      excused: endedHistory.filter(h => h.status === 'excused').length,
+      rate: endedHistory.length ? Math.round((attendedCount / endedHistory.length) * 100) : 100,
+      history: attendanceHistory,
+    };
+
+    // ——— قسم الامتحانات ———
+    const results = await ExamResult.find({ student: student._id })
+      .populate('exam', 'title type')
+      .sort({ submittedAt: -1 });
+    const examList = results.map(r => ({
+      resultId: r._id,
+      examTitle: r.exam?.title || 'امتحان',
+      examType: r.examType || r.exam?.type || '',
+      percentage: r.totalPercentage ?? r.writtenPercentage ?? 0,
+      isPassed: !!r.isPassed,
+      status: r.status,
+      date: r.submittedAt || r.createdAt,
+    }));
+    const avg = examList.length
+      ? Math.round(examList.reduce((s, e) => s + (e.percentage || 0), 0) / examList.length)
+      : null;
+    sections.exams = {
+      total: examList.length,
+      passed: examList.filter(e => e.isPassed).length,
+      average: avg,
+      results: examList,
+    };
+
+    // ——— أقسام مستقبلية: أضف هنا (مثال: sections.lessons / sections.payments) ———
+
+    res.json({
+      version: 1,
+      generatedAt: new Date(),
+      student: {
+        _id: student._id,
+        firstName: student.firstName,
+        lastName: student.lastName,
+        email: student.email,
+        phone: student.phone || '',
+        country: student.country || '',
+        assignedLevel: student.assignedLevel || '',
+        scheduleDays: student.scheduleDays || [],
+        sessionTime: student.sessionTime || '',
+        groupName: student.group?.name || '',
+        isApproved: !!student.isApproved,
+        createdAt: student.createdAt,
+      },
+      sections,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في تجهيز تقرير الطالب' });
   }
 };

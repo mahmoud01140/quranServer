@@ -3,7 +3,7 @@ import {
   getGroupPlan, createGroupPlan, getGroupFullPlan,
   assignCurriculumToGroup,
   addCustomLesson, updateCustomLesson, deleteCustomLesson, toggleLessonComplete,
-  getStudentPlan, createStudentPlan,
+  getStudentPlan, createStudentPlan, getStudentPlanFull, updateStudentCustomLesson,
   updateQuranProgress, updateParentApproval,
 } from '../controllers/studyPlan.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
@@ -37,7 +37,9 @@ router.delete('/group/:groupId/lessons/:lessonId', allowAdminOrTeacher, deleteCu
 
 // Student individual plan
 router.get('/student/:studentId', getStudentPlan);
+router.get('/student/:studentId/full', getStudentPlanFull);
 router.post('/student/:studentId', createStudentPlan);
+router.put('/student/:studentId/lessons/:lessonId', allowAdminOrTeacher, updateStudentCustomLesson);
 router.put('/student/:studentId/quran-progress', updateQuranProgress);
 router.put('/student/:studentId/parent-approval', updateParentApproval);
 

@@ -72,23 +72,23 @@ export const evaluateUserSubscription = async (user) => {
     await user.save();
   }
 
-  const hasGroup = Boolean(user.group);
+  // النظام فردي: لا مجموعات — الوصول يعتمد على السداد أو التجربة فقط
   const trialAttended = sub.trialSessionsAttended || 0;
   const hasTrialRemaining = trialAttended < trialAllowed;
   const isPaidActive = sub.status === 'active' && !isExpired;
-  const canAccessLiveSession = hasGroup && (isPaidActive || hasTrialRemaining);
+  const canAccessLiveSession = isPaidActive || hasTrialRemaining;
 
   return {
     ...sub.toObject ? sub.toObject() : sub,
     daysRemaining,
-    isExpired: hasGroup ? isExpired : false,
-    isExpiringSoon: hasGroup ? isExpiringSoon : false,
+    isExpired,
+    isExpiringSoon,
     canAccessLiveSession,
-    isTrial: hasGroup ? (!isPaidActive && hasTrialRemaining) : false,
+    isTrial: !isPaidActive && hasTrialRemaining,
     trialSessionsAttended: trialAttended,
     trialSessionsAllowed: trialAllowed,
-    hasGroup,
-    canSubscribe: hasGroup,
+    hasGroup: Boolean(user.group),
+    canSubscribe: true,
   };
 };
 
@@ -108,11 +108,11 @@ export const getPaymentConfig = async (req, res) => {
       annualDiscountPercent: settings.plan?.annualDiscountPercent || 20,
       period: 'شهري',
       features: [
-        'حضور جميع الجلسات المباشرة التفاعلية مع المعلم في مجموعتك',
+        'حضور جميع الجلسات المباشرة الفردية التفاعلية مع المعلم',
         'خطة متابعة الحفظ والختم ومراجعة المتشابهات والتجويد',
         'مراجعة وتصحيح التلاوات والتسميع الصوتي المباشر',
         'الوصول للتسجيلات ومكتبة الشروحات والمصادر التعليمية',
-        'حل الواجبات اليومية وبنك الاختبارات والتقييمات المستمرة',
+        'بنك الاختبارات والتقييمات المستمرة',
         'شهادة إتمام معتمدة وموثقة عند إنهاء المنهج الدراسي',
       ],
     };
@@ -162,13 +162,10 @@ export const submitPaymentRequest = async (req, res) => {
       return res.status(400).json({ message: 'يرجى إرفاق صورة إيصال التحويل أو لقطة الشاشة للعملية' });
     }
 
-    // Check if student has been placed in a group
+    // النظام فردي: السداد متاح لكل طالب دون شرط مجموعة
     const studentUser = await User.findById(req.user._id);
-    if (!studentUser || !studentUser.group) {
-      return res.status(400).json({
-        message: 'لا يمكن تقديم طلب سداد الاشتراك إلا بعد تسكينك في إحدى المجموعات واعتماد جدولك مع معلمك.',
-        code: 'NO_GROUP_ASSIGNED',
-      });
+    if (!studentUser) {
+      return res.status(400).json({ message: 'تعذر التحقق من حسابك.' });
     }
 
     // Check if user already has a pending payment request
@@ -430,7 +427,7 @@ export const approvePaymentAdmin = async (req, res) => {
       recipient: user._id,
       type: 'payment_approved',
       title: 'تم اعتماد اشتراكك وتفعيل صلاحياتك بنجاح! 🎉',
-      body: `تمت الموافقة على سداد الاشتراك وتفعيل حسابك لمدة ${durationDays} يوماً حتى ${endDate.toLocaleDateString('ar-EG')}. يمكنك الآن حضور كافة الحلقات المباشرة والتفاعل مع مجموعتك بحرية.`,
+      body: `تمت الموافقة على سداد الاشتراك وتفعيل حسابك لمدة ${durationDays} يوماً حتى ${endDate.toLocaleDateString('ar-EG')}. يمكنك الآن حضور حصصك المباشرة بحرية.`,
       data: { paymentId: payment._id, endDate },
     });
 
@@ -560,6 +557,15 @@ export const updatePaymentSettingsAdmin = async (req, res) => {
       if (plan.description !== undefined) settings.plan.description = plan.description;
       if (plan.priceEGP !== undefined) settings.plan.priceEGP = Number(plan.priceEGP) || settings.plan.priceEGP;
       if (plan.priceSAR !== undefined) settings.plan.priceSAR = Number(plan.priceSAR) || settings.plan.priceSAR;
+      // الخصومات تُحفظ فعلياً (0% مسموح) بدل تجاهلها
+      if (plan.quarterlyDiscountPercent !== undefined && plan.quarterlyDiscountPercent !== '') {
+        const v = Number(plan.quarterlyDiscountPercent);
+        if (!Number.isNaN(v)) settings.plan.quarterlyDiscountPercent = Math.min(100, Math.max(0, v));
+      }
+      if (plan.annualDiscountPercent !== undefined && plan.annualDiscountPercent !== '') {
+        const v = Number(plan.annualDiscountPercent);
+        if (!Number.isNaN(v)) settings.plan.annualDiscountPercent = Math.min(100, Math.max(0, v));
+      }
     }
 
     if (freeTrialSessionsCount !== undefined) {

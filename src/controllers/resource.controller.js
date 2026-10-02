@@ -11,31 +11,35 @@ const getFileType = (mimetype) => {
   return 'other';
 };
 
-// ─── Upload resource ─────────────────────────────────────────────────
+// ─── Upload resource (general when no groupId) ─────────────────────
 export const uploadResource = async (req, res) => {
   try {
     const { title, description, groupId, category } = req.body;
 
-    if (!title || !groupId) {
-      return res.status(400).json({ message: 'العنوان والمجموعة مطلوبان' });
+    if (!title) {
+      return res.status(400).json({ message: 'العنوان مطلوب' });
     }
     if (!req.file) {
       return res.status(400).json({ message: 'يرجى رفع ملف' });
     }
 
-    const group = await Group.findById(groupId).select('teacher');
-    if (!group) return res.status(404).json({ message: 'المجموعة غير موجودة' });
+    // موارد المجموعات: تحقق الملكية — الموارد العامة: معلم/أدمن فقط (المسار محمي)
+    let group = null;
+    if (groupId) {
+      group = await Group.findById(groupId).select('teacher');
+      if (!group) return res.status(404).json({ message: 'المجموعة غير موجودة' });
 
-    const isTeacher = group.teacher?.toString() === req.user._id.toString();
-    const isAdmin = req.user.role === 'admin';
-    if (!isTeacher && !isAdmin) {
-      return res.status(403).json({ message: 'غير مصرح' });
+      const isTeacher = group.teacher?.toString() === req.user._id.toString();
+      const isAdmin = req.user.role === 'admin';
+      if (!isTeacher && !isAdmin) {
+        return res.status(403).json({ message: 'غير مصرح' });
+      }
     }
 
     const resource = await Resource.create({
       title: title.trim().substring(0, 200),
       description: description?.trim()?.substring(0, 500) || '',
-      group: groupId,
+      group: groupId || undefined,
       uploadedBy: req.user._id,
       fileUrl: getFileUrl(req, req.file.path),
       fileName: req.file.originalname,
@@ -86,6 +90,37 @@ export const getGroupResources = async (req, res) => {
   }
 };
 
+// ─── Get general library (no group) ─────────────────────────────────
+// متاحة للمعلم/الأدمن دائماً، وللطالب المحدد مستواه والمسدد اشتراكه فقط
+export const getGeneralResources = async (req, res) => {
+  try {
+    const { category } = req.query;
+
+    if (req.user.role === 'student') {
+      if (!req.user.assignedLevel) {
+        return res.status(403).json({ message: 'المكتبة متاحة بعد تحديد مستواك' });
+      }
+      const sub = req.user.subscription || {};
+      const isPaidActive = sub.status === 'active' && (!sub.endDate || new Date(sub.endDate) > new Date());
+      if (!isPaidActive) {
+        return res.status(403).json({ message: 'المكتبة متاحة للمسددين اشتراكهم — سدد اشتراكك للوصول' });
+      }
+    }
+
+    const filter = { group: null, isActive: true };
+    if (category && category !== 'all') filter.category = category;
+
+    const resources = await Resource.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('uploadedBy', 'firstName lastName');
+
+    res.json({ resources });
+  } catch (error) {
+    console.error('getGeneralResources error:', error);
+    res.status(500).json({ message: 'خطأ في جلب المكتبة' });
+  }
+};
+
 // ─── Track download ──────────────────────────────────────────────────
 export const trackDownload = async (req, res) => {
   try {
@@ -102,11 +137,14 @@ export const deleteResource = async (req, res) => {
     const resource = await Resource.findById(req.params.id);
     if (!resource) return res.status(404).json({ message: 'المورد غير موجود' });
 
-    const group = await Group.findById(resource.group).select('teacher');
-    const isTeacher = group?.teacher?.toString() === req.user._id.toString();
-    const isAdmin = req.user.role === 'admin';
-    if (!isTeacher && !isAdmin) {
-      return res.status(403).json({ message: 'غير مصرح' });
+    // الموارد العامة يديرها أي معلم/أدمن (المسار محمي)، وموارد المجموعات لمعلمها أو الأدمن
+    if (resource.group) {
+      const group = await Group.findById(resource.group).select('teacher');
+      const isTeacher = group?.teacher?.toString() === req.user._id.toString();
+      const isAdmin = req.user.role === 'admin';
+      if (!isTeacher && !isAdmin) {
+        return res.status(403).json({ message: 'غير مصرح' });
+      }
     }
 
     resource.isActive = false;

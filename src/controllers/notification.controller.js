@@ -17,7 +17,11 @@ export const getNotifications = async (req, res) => {
 
 export const markAsRead = async (req, res) => {
   try {
-    await Notification.findByIdAndUpdate(req.params.id, { isRead: true, readAt: new Date() });
+    const notif = await Notification.findOneAndUpdate(
+      { _id: req.params.id, recipient: req.user._id },
+      { isRead: true, readAt: new Date() }
+    );
+    if (!notif) return res.status(404).json({ message: 'الإشعار غير موجود' });
     res.json({ message: 'تم التعليم كمقروء' });
   } catch (error) {
     res.status(500).json({ message: 'خطأ' });
@@ -38,16 +42,22 @@ export const markAllAsRead = async (req, res) => {
 
 export const deleteNotification = async (req, res) => {
   try {
-    await Notification.findByIdAndDelete(req.params.id);
+    const notif = await Notification.findOneAndDelete({ _id: req.params.id, recipient: req.user._id });
+    if (!notif) return res.status(404).json({ message: 'الإشعار غير موجود' });
     res.json({ message: 'تم الحذف' });
   } catch (error) {
     res.status(500).json({ message: 'خطأ' });
   }
 };
 
+const ALLOWED_TYPES = ['live_starting', 'exam_scheduled', 'exam', 'result_ready', 'grade_posted', 'group_assigned', 'plan_updated', 'progress_update', 'attendance', 'feedback', 'message', 'general'];
+
 export const sendNotification = async (req, res) => {
   try {
     const { recipientId, type, title, body, data } = req.body;
+    if (!ALLOWED_TYPES.includes(type)) {
+      return res.status(400).json({ message: 'نوع الإشعار غير صالح' });
+    }
     const notification = await Notification.create({ recipient: recipientId, type, title, body, data });
 
     const io = req.app.get('io');
@@ -67,6 +77,9 @@ export const sendNotification = async (req, res) => {
 export const sendGroupNotification = async (req, res) => {
   try {
     const { type, title, body, data } = req.body;
+    if (!ALLOWED_TYPES.includes(type)) {
+      return res.status(400).json({ message: 'نوع الإشعار غير صالح' });
+    }
     const group = await Group.findById(req.params.groupId).populate('students', 'pushSubscription');
 
     const io = req.app.get('io');

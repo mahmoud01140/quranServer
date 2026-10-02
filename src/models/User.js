@@ -49,6 +49,8 @@ const userSchema = new mongoose.Schema({
   surveyAnswers: [{ questionId: String, answer: String, questionText: String, answerText: String }],
   oralExamRecordings: [String],
   assignedLevel: { type: String, enum: ['foundation', 'memorization', 'teacher_prep', 'senior'] },
+  scheduleDays: [{ type: String }],
+  sessionTime: { type: String },
 
   group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group' },
 

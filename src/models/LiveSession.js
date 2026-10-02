@@ -60,7 +60,9 @@ const recitationTurnSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const liveSessionSchema = new mongoose.Schema({
-  group:       { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true },
+  group:       { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: false },
+  student:     { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  lesson:      { type: mongoose.Schema.Types.ObjectId },
   teacher:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   title:       { type: String, required: true },
   scheduledAt: { type: Date },
@@ -105,6 +107,15 @@ const liveSessionSchema = new mongoose.Schema({
   homeworkSubmissions: [homeworkSubmissionSchema],
 
   chatMessages: [chatMessageSchema],
+
+  // Shared mushaf state (teacher-driven, polled by student over HTTP)
+  sharedMushaf: {
+    sharing:   { type: Boolean, default: false },
+    surah:     { type: Number, min: 1, max: 114 },
+    fromVerse: { type: Number, min: 1 },
+    toVerse:   { type: Number, min: 1 },
+    updatedAt: { type: Date },
+  },
 }, { timestamps: true });
 
 const LiveSession = mongoose.model('LiveSession', liveSessionSchema);

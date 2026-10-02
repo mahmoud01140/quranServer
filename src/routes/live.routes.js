@@ -1,18 +1,14 @@
 import express from 'express';
 import {
-  getGroupSessions, createSession, getSessionById, getActiveSession,
+  getGroupSessions, createSession, getSessionById, getActiveSession, getMySessions,
   startSession, endSession, joinSession, sendChatMessage, getAttendees,
-  startGroupLiveSession,
-  // Homework
-  updateHomework, submitHomework, getGroupHomework,
-  getHomeworkSubmissions, checkHomeworkSubmission,
+  startGroupLiveSession, startStudentLiveSession,
   // Live Attendance Sheet System
   getAttendanceSheet, saveAttendanceSheet, sendAttendancePing, respondAttendancePong,
-  // Live Recitation Queue System
-  getRecitationQueue, raiseHandRecitation, startRecitationTurn, skipRecitationTurn, resetRecitationTurn, evaluateRecitationTurn
+  // Shared mushaf (HTTP polling)
+  getSharedMushaf, updateSharedMushaf
 } from '../controllers/live.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
-import { uploadHomeworkFiles } from '../middleware/upload.middleware.js';
 
 const router = express.Router();
 router.use(protect);
@@ -24,13 +20,12 @@ const allowAdminOrTeacher = (req, res, next) => {
   next();
 };
 
-// Group sessions
+// Student individual sessions & Group sessions
 router.get('/active/me', getActiveSession);
+router.get('/mine', getMySessions);
+router.post('/student/:studentId/start', allowAdminOrTeacher, startStudentLiveSession);
 router.get('/group/:groupId', getGroupSessions);
 router.post('/group/:groupId/start', allowAdminOrTeacher, startGroupLiveSession);
-
-// Homework for group (student: get pending homework list)
-router.get('/group/:groupId/homework', getGroupHomework);
 
 // All session management
 router.post('/', allowAdminOrTeacher, createSession);
@@ -47,18 +42,8 @@ router.put('/:id/attendance-sheet', allowAdminOrTeacher, saveAttendanceSheet);
 router.post('/:id/attendance-ping', allowAdminOrTeacher, sendAttendancePing);
 router.post('/:id/attendance-pong', respondAttendancePong);
 
-// Homework endpoints
-router.put('/:id/homework', allowAdminOrTeacher, updateHomework);
-router.post('/:id/homework/submit', uploadHomeworkFiles, submitHomework);
-router.get('/:id/homework/submissions', allowAdminOrTeacher, getHomeworkSubmissions);
-router.put('/:id/homework/submissions/:submissionId/check', allowAdminOrTeacher, checkHomeworkSubmission);
-
-// Live Recitation Queue System endpoints
-router.get('/:id/queue', getRecitationQueue);
-router.post('/:id/queue/raise-hand', raiseHandRecitation);
-router.post('/:id/queue/start-turn', allowAdminOrTeacher, startRecitationTurn);
-router.post('/:id/queue/skip-turn', allowAdminOrTeacher, skipRecitationTurn);
-router.post('/:id/queue/reset-turn', allowAdminOrTeacher, resetRecitationTurn);
-router.post('/:id/queue/evaluate-turn', allowAdminOrTeacher, evaluateRecitationTurn);
+// Shared mushaf state (polled over HTTP — no sockets)
+router.get('/:id/mushaf', getSharedMushaf);
+router.put('/:id/mushaf', allowAdminOrTeacher, updateSharedMushaf);
 
 export default router;

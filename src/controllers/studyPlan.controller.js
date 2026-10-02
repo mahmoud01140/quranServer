@@ -266,3 +266,74 @@ export const updateParentApproval = async (req, res) => {
     res.status(500).json({ message: 'خطأ' });
   }
 };
+
+// GET /api/study-plans/student/:studentId/full
+export const getStudentPlanFull = async (req, res) => {
+  try {
+    const isSelf = req.user._id.toString() === req.params.studentId;
+    const isStaff = ['admin', 'teacher'].includes(req.user.role);
+    const isParent = req.user.role === 'parent' && (req.user.children || []).some(c => c.toString() === req.params.studentId);
+    if (!isSelf && !isStaff && !isParent) {
+      return res.status(403).json({ message: 'غير مصرح لك بعرض خطة هذا الطالب' });
+    }
+
+    let plan = await StudyPlan.findOne({ student: req.params.studentId, type: 'individual' })
+      .populate('customLessons.exam', 'title type questions totalPoints passingScore duration');
+
+    if (!plan) {
+      plan = await StudyPlan.create({
+        student: req.params.studentId,
+        type: 'individual',
+        customLessons: [],
+      });
+    }
+
+    res.json({ plan });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في جلب خطة ومنهج الطالب' });
+  }
+};
+
+// PUT /api/study-plans/student/:studentId/lessons/:lessonId
+export const updateStudentCustomLesson = async (req, res) => {
+  try {
+    const { studentId, lessonId } = req.params;
+    const plan = await StudyPlan.findOne({ student: studentId, type: 'individual' });
+    if (!plan) return res.status(404).json({ message: 'خطة الطالب غير موجودة' });
+
+    const lesson = plan.customLessons.id(lessonId);
+    if (!lesson) return res.status(404).json({ message: 'الدرس غير موجود' });
+
+    const {
+      title,
+      description,
+      type,
+      duration,
+      resources,
+      videoUrl,
+      exam,
+      defaultHomework,
+      status,
+    } = req.body;
+
+    if (title !== undefined) lesson.title = title;
+    if (description !== undefined) lesson.description = description;
+    if (type !== undefined) lesson.type = type;
+    if (duration !== undefined) lesson.duration = duration;
+    if (resources !== undefined) lesson.resources = resources;
+    if (videoUrl !== undefined) lesson.videoUrl = videoUrl;
+    if (exam !== undefined) lesson.exam = exam || null;
+    if (defaultHomework !== undefined) lesson.defaultHomework = defaultHomework;
+    if (status !== undefined) lesson.status = status;
+
+    await plan.save();
+
+    const updatedPlan = await StudyPlan.findById(plan._id)
+      .populate('customLessons.exam', 'title type questions totalPoints passingScore duration');
+
+    res.json({ message: 'تم تحديث بيانات الدرس بنجاح', lesson, plan: updatedPlan });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في تحديث الدرس' });
+  }
+};
+

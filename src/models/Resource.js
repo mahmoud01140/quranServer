@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 const resourceSchema = new mongoose.Schema({
   title: { type: String, required: true, maxlength: 200 },
   description: { type: String, maxlength: 500 },
-  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true },
+  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: false }, // فارغ = مكتبة عامة للجميع
   uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 
   // File info

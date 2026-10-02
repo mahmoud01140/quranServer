@@ -14,7 +14,8 @@ const messageSchema = new mongoose.Schema({
 // Legacy group-only rooms (no lessonId) are left untouched in the DB but
 // have no serving route anymore.
 const discussionSchema = new mongoose.Schema({
-  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true },
+  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: false },
+  student: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   lessonId: { type: String, required: true },
   lessonTitle: { type: String, default: '' },
   messages: [messageSchema],
@@ -23,7 +24,8 @@ const discussionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // Index for faster queries
-discussionSchema.index({ group: 1, lessonId: 1 }, { unique: true });
+discussionSchema.index({ lessonId: 1 });
+discussionSchema.index({ student: 1, lessonId: 1 });
 discussionSchema.index({ 'messages.createdAt': -1 });
 discussionSchema.index({ lastMessageAt: -1 });
 

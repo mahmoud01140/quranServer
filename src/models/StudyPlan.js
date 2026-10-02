@@ -25,6 +25,8 @@ const customLessonSchema = new mongoose.Schema({
   duration:       { type: Number, default: 45 },
   isLiveRequired: { type: Boolean, default: false },
   resources:      { type: String },
+  videoUrl:       { type: String },
+  exam:           { type: mongoose.Schema.Types.ObjectId, ref: 'Exam' },
   order:          { type: Number, default: 0 },
   // Completion tracking — auto-set when the linked broadcast ends
   status: {

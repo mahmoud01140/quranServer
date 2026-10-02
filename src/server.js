@@ -21,7 +21,6 @@ import { uploadDir } from './middleware/upload.middleware.js';
 // Routes
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
-import groupRoutes from './routes/group.routes.js';
 import examRoutes from './routes/exam.routes.js';
 import liveRoutes from './routes/live.routes.js';
 import curriculumRoutes from './routes/curriculum.routes.js';
@@ -30,15 +29,11 @@ import notificationRoutes from './routes/notification.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import recordingRoutes from './routes/recording.routes.js';
 import discussionRoutes from './routes/discussion.routes.js';
-import dailyRecordRoutes from './routes/dailyRecord.routes.js';
-import sessionFeedbackRoutes from './routes/sessionFeedback.routes.js';
 import resourceRoutes from './routes/resource.routes.js';
-import studentRecitationRoutes from './routes/studentRecitation.routes.js';
 import parentRoutes from './routes/parent.routes.js';
 import calendarRoutes from './routes/calendar.routes.js';
 import reportsRoutes from './routes/reports.routes.js';
 import dailyTaskRoutes from './routes/dailyTask.routes.js';
-import ijazahRoutes from './routes/ijazah.routes.js';
 import surveyRoutes from './routes/survey.routes.js';
 
 
@@ -158,7 +153,6 @@ app.use('/uploads', express.static(uploadDir, {
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/groups', groupRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/live', liveRoutes);
 app.use('/api/curriculum', curriculumRoutes);
@@ -167,15 +161,11 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/recordings', recordingRoutes);
 app.use('/api/discussions', discussionRoutes);
-app.use('/api/daily-records', dailyRecordRoutes);
-app.use('/api/session-feedback', sessionFeedbackRoutes);
 app.use('/api/resources', resourceRoutes);
-app.use('/api/student-recitations', studentRecitationRoutes);
 app.use('/api/parents', parentRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/daily-tasks', dailyTaskRoutes);
-app.use('/api/ijazah', ijazahRoutes);
 app.use('/api/survey', surveyRoutes);
 
 
@@ -221,7 +211,13 @@ const gracefulShutdown = async (signal) => {
       session.status = 'ended';
       session.endedAt = new Date();
       await session.save();
-      io.to(`group:${session.group}`).emit('broadcast-ended', { sessionId: session._id });
+      if (session.group) {
+        io.to(`group:${session.group}`).emit('broadcast-ended', { sessionId: session._id });
+      }
+      // الجلسات الفردية بلا مجموعة — إشعار مباشر للطالب
+      if (session.student) {
+        io.emitToUser(session.student.toString(), 'broadcast-ended', { sessionId: session._id });
+      }
     }
     if (activeSessions.length > 0) {
       console.log(`  📴 Ended ${activeSessions.length} active live sessions`);

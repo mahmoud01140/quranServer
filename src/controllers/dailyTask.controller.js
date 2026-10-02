@@ -1,7 +1,6 @@
 import DailyTask from '../models/DailyTask.js';
 import User from '../models/User.js';
 import Group from '../models/Group.js';
-import DailyRecord from '../models/DailyRecord.js';
 
 // Quran surah helper
 const SURAH_NAMES = [
@@ -23,21 +22,6 @@ const SURAH_NAMES = [
 export const getTodayTask = async (req, res) => {
   try {
     const studentId = req.user._id;
-    const user = await User.findById(studentId).populate('group');
-
-    let groupId = user?.group?._id || user?.group;
-    if (!groupId) {
-      const foundGroup = await Group.findOne({ students: studentId }).select('_id');
-      if (foundGroup) {
-        groupId = foundGroup._id;
-        User.findByIdAndUpdate(studentId, { group: groupId }).catch(() => {});
-      }
-    }
-
-    if (!groupId) {
-      return res.status(404).json({ message: 'الطالب غير مسكن في مجموعة دراسية' });
-    }
-
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const endOfToday = new Date();
@@ -197,24 +181,31 @@ export const assignStudentDailyTask = async (req, res) => {
     }
 
     if (newHifz) {
+      const prev = task.newHifz?.toObject?.() || {};
+      // ورد جديد مختلف = يُعاد للمعلق حتى لو أُنجز القديم
+      const changed = ['surahNumber', 'surahName', 'fromVerse', 'toVerse']
+        .some(k => newHifz[k] !== undefined && newHifz[k] !== prev[k]);
       task.newHifz = {
-        ...(task.newHifz?.toObject?.() || {}),
+        ...prev,
         ...newHifz,
         versesCount: (newHifz.toVerse && newHifz.fromVerse)
           ? (newHifz.toVerse - newHifz.fromVerse + 1)
           : (newHifz.versesCount || 0),
-        status: newHifz.status || task.newHifz?.status || 'pending',
+        status: newHifz.status || (changed ? 'pending' : (task.newHifz?.status || 'pending')),
       };
     }
 
     if (nearRevision) {
+      const prev = task.nearRevision?.toObject?.() || {};
+      const changed = ['surahNumber', 'surahName', 'fromVerse', 'toVerse']
+        .some(k => nearRevision[k] !== undefined && nearRevision[k] !== prev[k]);
       task.nearRevision = {
-        ...(task.nearRevision?.toObject?.() || {}),
+        ...prev,
         ...nearRevision,
         versesCount: (nearRevision.toVerse && nearRevision.fromVerse)
           ? (nearRevision.toVerse - nearRevision.fromVerse + 1)
           : (nearRevision.versesCount || 0),
-        status: nearRevision.status || task.nearRevision?.status || 'pending',
+        status: nearRevision.status || (changed ? 'pending' : (task.nearRevision?.status || 'pending')),
       };
     }
 
