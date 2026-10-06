@@ -9,6 +9,7 @@ import {
   getAllPaymentsAdmin,
   approvePaymentAdmin,
   rejectPaymentAdmin,
+  activateSubscriptionManually,
   getPaymentSettingsAdmin,
   updatePaymentSettingsAdmin,
 } from '../controllers/payment.controller.js';
@@ -34,6 +35,8 @@ router.get('/admin/all', protect, adminOnly, getAllPaymentsAdmin);
 router.post('/admin/:id/approve', protect, adminOnly, approvePaymentAdmin);
 // Reject payment with reason
 router.post('/admin/:id/reject', protect, adminOnly, rejectPaymentAdmin);
+// Manual activation without payment
+router.post('/admin/activate/:studentId', protect, adminOnly, activateSubscriptionManually);
 // Get / Update payment accounts settings (Vodafone Cash / InstaPay / Pricing)
 router.get('/admin/settings', protect, adminOnly, getPaymentSettingsAdmin);
 router.put('/admin/settings', protect, adminOnly, updatePaymentSettingsAdmin);

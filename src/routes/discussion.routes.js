@@ -1,26 +1,39 @@
 import express from 'express';
 import {
+  getMyThread,
+  sendStudentMessage,
+  getAdminConversations,
+  getAdminStudentThread,
+  sendAdminReply,
   getLessonDiscussion,
   sendLessonMessage,
-  toggleLessonPinMessage,
+  pinLessonMessage,
   deleteLessonMessage,
 } from '../controllers/discussion.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
+import { adminOnly } from '../middleware/role.middleware.js';
 
 const router = express.Router();
 router.use(protect);
 
-// One room per lesson — pure HTTP polling, no socket.io.
-// GET  /api/discussions/lesson/:lessonId          — Get/create lesson room
+// ─── Direct Student-Admin Discussions (Pure HTTP, Vercel-Safe, Zero Sockets) ──
+
+// Student Routes
+router.get('/my-thread', getMyThread);
+router.post('/my-thread', sendStudentMessage);
+
+// Admin Routes
+router.get('/admin/conversations', adminOnly, getAdminConversations);
+router.get('/admin/conversations/:studentId', adminOnly, getAdminStudentThread);
+router.post('/admin/conversations/:studentId', adminOnly, sendAdminReply);
+
+// General message delete
+router.delete('/messages/:messageId', deleteLessonMessage);
+
+// Legacy Fallbacks (graceful redirection, prevents 500 crashes)
 router.get('/lesson/:lessonId', getLessonDiscussion);
-
-// POST /api/discussions/lesson/:lessonId/messages — Send a message
 router.post('/lesson/:lessonId/messages', sendLessonMessage);
-
-// PUT  /api/discussions/lesson/:lessonId/messages/:messageId/pin — Toggle pin
-router.put('/lesson/:lessonId/messages/:messageId/pin', toggleLessonPinMessage);
-
-// DELETE /api/discussions/lesson/:lessonId/messages/:messageId — Delete message
+router.put('/lesson/:lessonId/messages/:messageId/pin', pinLessonMessage);
 router.delete('/lesson/:lessonId/messages/:messageId', deleteLessonMessage);
 
 export default router;

@@ -54,3 +54,5 @@ export const optionalAuth = async (req, res, next) => {
   }
   next();
 };
+
+export { requireRole as authorize } from './role.middleware.js';

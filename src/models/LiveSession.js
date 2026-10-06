@@ -59,6 +59,14 @@ const recitationTurnSchema = new mongoose.Schema({
   },
 }, { timestamps: true });
 
+// Guard against unbounded document growth (MongoDB 16MB limit).
+// chatMessages is additionally trimmed via $slice in sendChatMessage;
+// these schema validators cover every other write path (save()).
+const maxArrayLength = (max) => ({
+  validator: (v) => !v || v.length <= max,
+  message: `Array exceeds maximum length of ${max}`,
+});
+
 const liveSessionSchema = new mongoose.Schema({
   group:       { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: false },
   student:     { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -76,15 +84,14 @@ const liveSessionSchema = new mongoose.Schema({
 
   roomId:       { type: String, unique: true, default: () => uuidv4() },
   recordingUrl: { type: String },
-  teacherSocketId: { type: String },
   lastHeartbeat:   { type: Date },
   isRecorded:   { type: Boolean, default: true },
 
-  attendees: [attendeeSchema],
-  attendanceRecords: [attendanceRecordSchema],
+  attendees: { type: [attendeeSchema], validate: maxArrayLength(2000) },
+  attendanceRecords: { type: [attendanceRecordSchema], validate: maxArrayLength(2000) },
 
   // Live Recitation Queue System
-  recitationQueue: [recitationTurnSchema],
+  recitationQueue: { type: [recitationTurnSchema], validate: maxArrayLength(2000) },
   currentSpeaker:  { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
   sessionType: {
@@ -104,9 +111,18 @@ const liveSessionSchema = new mongoose.Schema({
     toVerse:     { type: Number },
   },
 
-  homeworkSubmissions: [homeworkSubmissionSchema],
+  homeworkSubmissions: { type: [homeworkSubmissionSchema], validate: maxArrayLength(500) },
 
-  chatMessages: [chatMessageSchema],
+  chatMessages: { type: [chatMessageSchema], validate: maxArrayLength(500) },
+
+  // Roll-call ping state (HTTP polling — Vercel-safe, replaces socket.io attendance-ping)
+  activePing: {
+    pingId:         { type: String },
+    message:        { type: String },
+    sentAt:         { type: Date },
+    expiresAt:      { type: Date },
+    sentBy:         { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  },
 
   // Shared mushaf state (teacher-driven, polled by student over HTTP)
   sharedMushaf: {
@@ -117,6 +133,13 @@ const liveSessionSchema = new mongoose.Schema({
     updatedAt: { type: Date },
   },
 }, { timestamps: true });
+
+// Hot polling paths (GET /api/live/active/me runs every 5-10s per viewer):
+// findOne({ status:'live', student }), findOne({ status:'live', group }),
+// findOne({ status:'live', teacher }). Status-led compounds serve all three.
+liveSessionSchema.index({ status: 1, student: 1 });
+liveSessionSchema.index({ status: 1, group: 1 });
+liveSessionSchema.index({ status: 1, teacher: 1 });
 
 const LiveSession = mongoose.model('LiveSession', liveSessionSchema);
 export default LiveSession;

@@ -59,9 +59,7 @@ export const sendNotification = async (req, res) => {
       return res.status(400).json({ message: 'نوع الإشعار غير صالح' });
     }
     const notification = await Notification.create({ recipient: recipientId, type, title, body, data });
-
-    const io = req.app.get('io');
-    if (io) io.emitToUser(recipientId, 'notification', notification);
+    // Frontend polls GET /notifications (Vercel-safe, no socket.io).
 
     const recipient = await User.findById(recipientId).select('pushSubscription');
     if (recipient?.pushSubscription) {
@@ -82,11 +80,9 @@ export const sendGroupNotification = async (req, res) => {
     }
     const group = await Group.findById(req.params.groupId).populate('students', 'pushSubscription');
 
-    const io = req.app.get('io');
     const notifs = await Promise.all(
       group.students.map(async (student) => {
         const notif = await Notification.create({ recipient: student._id, type, title, body, data });
-        if (io) io.emitToUser(student._id, 'notification', notif);
         if (student.pushSubscription) await sendWebPush(student.pushSubscription, title, body, data);
         return notif;
       })

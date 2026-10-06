@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import User from '../models/User.js';
 import Group from '../models/Group.js';
 import Notification from '../models/Notification.js';
@@ -17,7 +18,9 @@ export const getAllUsers = async (req, res) => {
     if (status === 'inactive') { filter.isActive = false; }
     if (country) filter.country = country;
     if (search && search.trim()) {
-      const sRegex = new RegExp(search.trim(), 'i');
+      // ReDoS-safe: escape user input before building RegExp + cap length
+      const escaped = search.trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const sRegex = new RegExp(escaped, 'i');
       filter.$or = [
         { firstName: sRegex },
         { lastName: sRegex },
@@ -83,7 +86,7 @@ export const getScheduleMap = async (req, res) => {
 export const getStudentsList = async (req, res) => {
   try {
     const students = await User.find({ role: 'student', isActive: { $ne: false } })
-      .select('firstName lastName email avatar assignedLevel scheduleDays sessionTime isApproved country createdAt placementExamScore')
+      .select('firstName lastName email phone avatar role assignedLevel scheduleDays sessionTime isApproved country createdAt placementExamScore')
       .sort({ createdAt: -1 })
       .limit(500);
     res.json({ students, total: students.length });
@@ -210,17 +213,58 @@ export const updateUser = async (req, res) => {
     const allowedFields = ['firstName', 'lastName', 'phone', 'country', 'avatar', 'notificationPreferences', 'dateOfBirth', 'gender', 'registrationType'];
     const updates = {};
     allowedFields.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+    // وحّد رقم الهاتف عند التعديل (مهم لإضافة هواتف الحسابات القديمة) — مع رفض الصيغ الباطلة
+    // المسح التام عبر $unset (لا null) حتى لا يتعارض مع unique index
+    let unsetPhone = false;
+    if (updates.phone !== undefined) {
+      const { normalizePhone } = await import('../models/User.js');
+      if (updates.phone && !normalizePhone(updates.phone)) {
+        return res.status(400).json({ message: 'رقم الهاتف غير صالح — أدخل رقماً مصرياً (01xxxxxxxxx)' });
+      }
+      const normalized = normalizePhone(updates.phone);
+      if (normalized) {
+        updates.phone = normalized;
+      } else {
+        delete updates.phone;
+        unsetPhone = true;
+      }
+    }
 
     // Admin can update role
     if (req.user.role === 'admin' && req.body.role) updates.role = req.body.role;
     if (req.user.role === 'admin' && req.body.isActive !== undefined) updates.isActive = req.body.isActive;
 
-    const user = await User.findByIdAndUpdate(req.params.id, updates, { new: true })
+    const updateDoc = unsetPhone ? { $set: updates, $unset: { phone: 1 } } : updates;
+    const user = await User.findByIdAndUpdate(req.params.id, updateDoc, { new: true })
       .select('-password -otp');
     if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
     res.json({ message: 'تم التحديث بنجاح', user });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في التحديث' });
+  }
+};
+
+// PUT /api/users/:id/reset-password — admin only
+// تعيين كلمة مرور مؤقتة لمستخدم نسيها (بديل الاستعادة بالبريد لمستخدمي الهاتف).
+// تُعرض مرة واحدة للأدمن لإيصالها للطالب — غيّرها الطالب بعد الدخول.
+export const resetUserPassword = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('+password');
+    if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
+    if (user.role === 'admin' && req.user._id.toString() !== user._id.toString()) {
+      return res.status(403).json({ message: 'لا يمكن تعيين كلمة مرور لأدمن آخر' });
+    }
+    const tempPassword = crypto.randomBytes(4).toString('hex'); // 8 أحرف
+    user.password = tempPassword;
+    user.resetToken = undefined;
+    user.resetTokenExpires = undefined;
+    await user.save(); // pre-save hook يشفرها تلقائياً
+    res.json({
+      message: `تم تعيين كلمة مرور مؤقتة لـ ${user.firstName} ${user.lastName} — أوصلها له واطلب منه تغييرها بعد الدخول`,
+      tempPassword,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في تعيين كلمة المرور' });
   }
 };
 
@@ -271,8 +315,7 @@ export const approveUser = async (req, res) => {
 
     if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
 
-    // Send notification
-    const io = req.app.get('io');
+    // Send notification (DB + Web Push; frontend polls — no socket.io)
     const scheduleDesc = (user.scheduleDays?.length ? `أيامك: ${user.scheduleDays.join('، ')}` : '') + (user.sessionTime ? ` الساعة ${user.sessionTime}` : '');
     const notification = await Notification.create({
       recipient: user._id,
@@ -280,7 +323,6 @@ export const approveUser = async (req, res) => {
       title: 'تم اعتماد حسابك وجدولة مواعيدك بنجاح ✅',
       body: `مرحباً ${user.firstName}! تم اعتماد مستواك ومواعيدك للبث المباشر الفردي. ${scheduleDesc}`,
     });
-    if (io) io.emitToUser(user._id, 'notification', notification);
     if (user.pushSubscription) {
       await sendWebPush(user.pushSubscription, notification.title, notification.body);
     }
@@ -369,7 +411,16 @@ export const getMyAttendanceStats = async (req, res) => {
 // PUT /api/users/:id/push-subscription
 export const updatePushSubscription = async (req, res) => {
   try {
-    await User.findByIdAndUpdate(req.params.id, { pushSubscription: req.body.subscription });
+    // Prevent IDOR: only the user themselves or an admin can update this subscription
+    if (req.user.role !== 'admin' && req.user._id.toString() !== req.params.id) {
+      return res.status(403).json({ message: 'غير مصرح لك بتعديل اشتراك هذا المستخدم' });
+    }
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { pushSubscription: req.body.subscription },
+      { new: true }
+    ).select('_id');
+    if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
     res.json({ message: 'تم تحديث اشتراك الإشعارات' });
   } catch (error) {
     res.status(500).json({ message: 'خطأ' });

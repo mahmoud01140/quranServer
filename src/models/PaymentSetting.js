@@ -42,7 +42,6 @@ const paymentSettingSchema = new mongoose.Schema({
     name: { type: String, default: 'الاشتراك الشهري في الحلقات' },
     description: { type: String, default: 'اشتراك شهري شامل لحضور كافة الحلقات المباشرة، خطة الحفظ والختم، وتصحيح التلاوات مع المعلم' },
     priceEGP: { type: Number, default: 250 },
-    priceSAR: { type: Number, default: 49 },
     quarterlyDiscountPercent: { type: Number, default: 10 },
     annualDiscountPercent: { type: Number, default: 20 },
   },

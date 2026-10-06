@@ -2,7 +2,7 @@ import Payment from '../models/Payment.js';
 import PaymentSetting from '../models/PaymentSetting.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
-import { getFileUrl } from '../middleware/upload.middleware.js';
+import { getFileUrl, isTrustedCloudinaryUrl, sanitizePublicId } from '../middleware/upload.middleware.js';
 
 // ─── Helper: Check and update user subscription status ─────────
 export const evaluateUserSubscription = async (user) => {
@@ -103,7 +103,6 @@ export const getPaymentConfig = async (req, res) => {
       name: settings.plan?.name || 'الاشتراك الشهري في الحلقات',
       description: settings.plan?.description || 'اشتراك شهري شامل لحضور كافة الحلقات المباشرة، خطة الحفظ والختم، وتصحيح التلاوات مع المعلم',
       priceEGP: settings.plan?.priceEGP || 250,
-      priceSAR: settings.plan?.priceSAR || 49,
       quarterlyDiscountPercent: settings.plan?.quarterlyDiscountPercent || 10,
       annualDiscountPercent: settings.plan?.annualDiscountPercent || 20,
       period: 'شهري',
@@ -113,7 +112,6 @@ export const getPaymentConfig = async (req, res) => {
         'مراجعة وتصحيح التلاوات والتسميع الصوتي المباشر',
         'الوصول للتسجيلات ومكتبة الشروحات والمصادر التعليمية',
         'بنك الاختبارات والتقييمات المستمرة',
-        'شهادة إتمام معتمدة وموثقة عند إنهاء المنهج الدراسي',
       ],
     };
 
@@ -122,6 +120,14 @@ export const getPaymentConfig = async (req, res) => {
       plan,
       freeTrialSessionsCount: settings.freeTrialSessionsCount || 1,
       reminderDaysBeforeExpiry: settings.reminderDaysBeforeExpiry || 3,
+      // Public upload settings for direct browser-to-Cloudinary uploads
+      // (unsigned presets are public by design — no secrets exposed here).
+      cloudinary: {
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME || null,
+        audioPreset: process.env.CLOUDINARY_AUDIO_PRESET || 'quran-audio',
+        receiptPreset: process.env.CLOUDINARY_RECEIPT_PRESET || 'quran-receipts',
+        resourcePreset: process.env.CLOUDINARY_RESOURCE_PRESET || 'quran-resources',
+      },
       methods: {
         vodafoneCash: {
           enabled: settings.vodafoneEnabled,
@@ -152,26 +158,52 @@ export const getPaymentConfig = async (req, res) => {
 // Student submits a payment request with receipt screenshot
 export const submitPaymentRequest = async (req, res) => {
   try {
-    const { billingCycle = 'monthly', amount, currency = 'EGP', method, senderPhone, senderName, referenceNumber, notes } = req.body;
+    // الدفع بالجنيه المصري فقط — تُتجاهل أي عملة مرسلة من العميل لمنع العبث
+    const currency = 'EGP';
+    const { billingCycle = 'monthly', amount, method, senderPhone, senderName, referenceNumber, notes } = req.body;
 
     if (!method || !['vodafone_cash', 'instapay'].includes(method)) {
       return res.status(400).json({ message: 'طريقة الدفع غير صالحة. يرجى اختيار فودافون كاش أو انستاباي' });
     }
 
-    if (!req.file) {
+    // Receipt arrives either as a direct browser upload (verified Cloudinary URL,
+    // preferred on Vercel) or as a legacy multipart file via server relay.
+    const directReceipt =
+      req.body?.receiptUrl && isTrustedCloudinaryUrl(req.body.receiptUrl)
+        ? {
+            url: req.body.receiptUrl,
+            publicId: sanitizePublicId(req.body.receiptPublicId),
+            resourceType:
+              typeof req.body.receiptResourceType === 'string'
+                ? req.body.receiptResourceType.slice(0, 20)
+                : undefined,
+          }
+        : null;
+
+    if (!req.file && !directReceipt) {
       return res.status(400).json({ message: 'يرجى إرفاق صورة إيصال التحويل أو لقطة الشاشة للعملية' });
     }
 
-    // النظام فردي: السداد متاح لكل طالب دون شرط مجموعة
-    const studentUser = await User.findById(req.user._id);
-    if (!studentUser) {
-      return res.status(400).json({ message: 'تعذر التحقق من حسابك.' });
+    // Support parent paying for a linked child
+    let targetUserId = req.user._id;
+    if (req.user.role === 'parent' && req.body.studentId) {
+      const parentUser = await User.findById(req.user._id);
+      const isLinkedChild = parentUser?.children?.some(c => c.toString() === req.body.studentId.toString());
+      if (!isLinkedChild) {
+        return res.status(403).json({ message: 'هذا الطالب غير مرتبط بحسابك' });
+      }
+      targetUserId = req.body.studentId;
     }
 
-    // Check if user already has a pending payment request
-    const existingPending = await Payment.findOne({ user: req.user._id, status: 'pending' });
+    const studentUser = await User.findById(targetUserId);
+    if (!studentUser) {
+      return res.status(400).json({ message: 'تعذر التحقق من الحساب المراد سداده.' });
+    }
+
+    // Check if target user already has a pending payment request
+    const existingPending = await Payment.findOne({ user: targetUserId, status: 'pending' });
     if (existingPending) {
-      return res.status(400).json({ message: 'لديك طلب سداد قيد المراجعة بالفعل حالياً. يرجى الانتظار حتى يتم تدقيقه من الإدارة.' });
+      return res.status(400).json({ message: 'يوجد طلب سداد قيد المراجعة بالفعل لهذا الطالب حالياً. يرجى الانتظار حتى يتم تدقيقه من الإدارة.' });
     }
 
     // Check duplicate reference number (if provided)
@@ -186,11 +218,11 @@ export const submitPaymentRequest = async (req, res) => {
       }
     }
 
-    const receiptUrl = getFileUrl(req, req.file.path);
+    const receiptUrl = directReceipt ? directReceipt.url : getFileUrl(req, req.file?.path);
 
     // Calculate server-enforced pricing & duration based on settings
     const settings = await PaymentSetting.getSettings();
-    const basePrice = currency === 'SAR' ? (settings.plan?.priceSAR || 49) : (settings.plan?.priceEGP || 250);
+    const basePrice = settings.plan?.priceEGP || 250;
 
     let activationDurationDays = 30;
     let calculatedAmount = basePrice;
@@ -208,8 +240,10 @@ export const submitPaymentRequest = async (req, res) => {
       calculatedAmount = basePrice;
     }
 
+    const parentNote = req.user.role === 'parent' ? `[سداد بواسطة ولي الأمر: ${req.user.firstName || ''} ${req.user.lastName || ''}] ` : '';
+
     const payment = await Payment.create({
-      user: req.user._id,
+      user: targetUserId,
       plan: 'monthly',
       billingCycle,
       amount: calculatedAmount,
@@ -219,8 +253,10 @@ export const submitPaymentRequest = async (req, res) => {
       senderName: senderName || '',
       referenceNumber: trimmedRef,
       receiptUrl,
+      receiptPublicId: directReceipt?.publicId || req.file?.cloudinaryPublicId || undefined,
+      receiptResourceType: directReceipt?.resourceType || req.file?.cloudinaryResourceType || undefined,
       activationDurationDays,
-      notes: notes || '',
+      notes: parentNote + (notes || ''),
       status: 'pending',
     });
 
@@ -237,17 +273,7 @@ export const submitPaymentRequest = async (req, res) => {
     );
     await Promise.all(notificationPromises);
 
-    // Emit socket event to admins
-    const io = req.app.get('io');
-    if (io) {
-      io.emit('admin-payment-received', {
-        paymentId: payment._id,
-        user: { _id: req.user._id, name: `${req.user.firstName} ${req.user.lastName}`, email: req.user.email },
-        method,
-        amount: payment.amount,
-        createdAt: payment.createdAt,
-      });
-    }
+    // Admins poll GET /payments lists (Vercel-safe, no socket.io).
 
     res.status(201).json({
       success: true,
@@ -256,7 +282,8 @@ export const submitPaymentRequest = async (req, res) => {
     });
   } catch (error) {
     console.error('Error submitting payment:', error);
-    res.status(500).json({ message: 'حدث خطأ أثناء معالجة طلب الدفع', error: error.message });
+    // Never expose raw error.message to the client in production (may leak DB paths/internals)
+    res.status(500).json({ message: 'حدث خطأ أثناء معالجة طلب الدفع' });
   }
 };
 
@@ -297,7 +324,9 @@ export const getAllPaymentsAdmin = async (req, res) => {
     }
 
     if (search && search.trim()) {
-      const sRegex = new RegExp(search.trim(), 'i');
+      // ReDoS-safe: escape user input before building RegExp + cap length
+      const escaped = search.trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const sRegex = new RegExp(escaped, 'i');
       const matchingUsers = await User.find({
         $or: [
           { firstName: sRegex },
@@ -431,16 +460,7 @@ export const approvePaymentAdmin = async (req, res) => {
       data: { paymentId: payment._id, endDate },
     });
 
-    // Socket notification to user
-    const io = req.app.get('io');
-    if (io) {
-      io.to(`user:${user._id}`).emit('subscription-updated', {
-        status: 'active',
-        startDate,
-        endDate,
-        canAccessLiveSession: true,
-      });
-    }
+    // Student sees status via GET /payments/my-history polling (no socket.io).
 
     res.json({
       success: true,
@@ -450,6 +470,63 @@ export const approvePaymentAdmin = async (req, res) => {
   } catch (error) {
     console.error('Error approving payment:', error);
     res.status(500).json({ message: 'حدث خطأ أثناء اعتماد طلب الدفع' });
+  }
+};
+
+// ─── POST /api/payments/admin/activate/:studentId ─────────────────
+// Admin manually activates a student's subscription without payment
+export const activateSubscriptionManually = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const durationDays = Math.min(1000, Math.max(1, Number(req.body?.durationDays) || 30));
+
+    const user = await User.findById(studentId);
+    if (!user || user.role !== 'student') {
+      return res.status(404).json({ message: 'الطالب غير موجود' });
+    }
+
+    const now = new Date();
+    let startDate = now;
+    let endDate;
+    if (user.subscription?.status === 'active' && user.subscription.endDate && new Date(user.subscription.endDate) > now) {
+      startDate = new Date(user.subscription.startDate || now);
+      endDate = new Date(new Date(user.subscription.endDate).getTime() + durationDays * 24 * 60 * 60 * 1000);
+    } else {
+      endDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
+    }
+
+    const settings = await PaymentSetting.getSettings();
+    const trialAllowed = settings.freeTrialSessionsCount || 1;
+
+    user.subscription = {
+      plan: 'monthly',
+      status: 'active',
+      startDate,
+      endDate,
+      paymentMethod: 'manual',
+      trialSessionsAttended: trialAllowed,
+      trialSessionsAllowed: trialAllowed,
+    };
+    await user.save();
+
+    await Notification.create({
+      recipient: user._id,
+      type: 'payment_approved',
+      title: 'تم تفعيل اشتراكك من الإدارة! 🎉',
+      body: `فعّلت الإدارة اشتراكك لمدة ${durationDays} يوماً حتى ${endDate.toLocaleDateString('ar-EG')}. يمكنك الآن حضور حصصك بحرية.`,
+      data: { endDate },
+    });
+
+    // Student sees status via GET /payments/my-history polling (no socket.io).
+
+    res.json({
+      success: true,
+      message: `تم تفعيل الاشتراك يدوياً حتى ${endDate.toLocaleDateString('ar-EG')}`,
+      subscription: user.subscription,
+    });
+  } catch (error) {
+    console.error('Error manual activation:', error);
+    res.status(500).json({ message: 'حدث خطأ أثناء التفعيل اليدوي' });
   }
 };
 
@@ -487,13 +564,7 @@ export const rejectPaymentAdmin = async (req, res) => {
       data: { paymentId: payment._id, reason: payment.rejectionReason },
     });
 
-    const io = req.app.get('io');
-    if (io) {
-      io.to(`user:${payment.user}`).emit('payment-rejected', {
-        paymentId: payment._id,
-        reason: payment.rejectionReason,
-      });
-    }
+    // Student sees rejection via GET /payments/my-history + notifications polling (no socket.io).
 
     res.json({
       success: true,
@@ -556,7 +627,6 @@ export const updatePaymentSettingsAdmin = async (req, res) => {
       if (plan.name !== undefined) settings.plan.name = plan.name;
       if (plan.description !== undefined) settings.plan.description = plan.description;
       if (plan.priceEGP !== undefined) settings.plan.priceEGP = Number(plan.priceEGP) || settings.plan.priceEGP;
-      if (plan.priceSAR !== undefined) settings.plan.priceSAR = Number(plan.priceSAR) || settings.plan.priceSAR;
       // الخصومات تُحفظ فعلياً (0% مسموح) بدل تجاهلها
       if (plan.quarterlyDiscountPercent !== undefined && plan.quarterlyDiscountPercent !== '') {
         const v = Number(plan.quarterlyDiscountPercent);

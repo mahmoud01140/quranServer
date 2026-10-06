@@ -5,7 +5,6 @@ import './utils/logger.js'; // silences console.log in production
 
 import express from 'express';
 import http from 'http';
-import { Server } from 'socket.io';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -14,7 +13,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import connectDB from './config/db.js';
-import { initSocket } from './config/socket.js';
 import { protect } from './middleware/auth.middleware.js';
 import { uploadDir } from './middleware/upload.middleware.js';
 
@@ -35,6 +33,7 @@ import calendarRoutes from './routes/calendar.routes.js';
 import reportsRoutes from './routes/reports.routes.js';
 import dailyTaskRoutes from './routes/dailyTask.routes.js';
 import surveyRoutes from './routes/survey.routes.js';
+import maintenanceRoutes from './routes/maintenance.routes.js';
 
 
 // Parse allowed origins (supports comma-separated CLIENT_URL for multiple domains)
@@ -84,29 +83,10 @@ app.set('trust proxy', 1);
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// Initialize Socket.io
-const io = new Server(server, {
-  cors: {
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      const allowedOrigins = getAllowedOrigins();
-      const isAllowed = allowedOrigins.some(allowed => {
-        if (allowed === '*' || allowed === origin) return true;
-        if (origin.endsWith('.vercel.app') && allowed.includes('vercel.app')) return true;
-        return false;
-      });
-      callback(null, isAllowed);
-    },
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
-  pingTimeout: 30000,
-  pingInterval: 10000,
-});
-
-// Make io accessible in routes/controllers
-app.set('io', io);
-initSocket(io);
+// Realtime is HTTP polling (Vercel-safe) — no socket.io.
+// Live sessions are discovered via GET /api/live/active/me,
+// roll-call via activePing field, chat via GET /api/live/:id/chat?since=.
+// See live.controller.js sanitizeActivePing / sendAttendancePing.
 
 // Security middleware
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
@@ -127,7 +107,6 @@ const limiter = rateLimit({
   max: 500,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path.startsWith('/socket.io'), // Don't rate-limit socket.io polling
   message: { message: 'Too many requests, please try again later.' },
 });
 app.use('/api/', limiter);
@@ -167,6 +146,7 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/daily-tasks', dailyTaskRoutes);
 app.use('/api/survey', surveyRoutes);
+app.use('/api/maintenance', maintenanceRoutes);
 
 
 // Health check
@@ -193,7 +173,7 @@ const PORT = process.env.PORT || 5000;
 if (!process.env.VERCEL) {
   server.listen(PORT, () => {
     console.log(`🕌 Quran Platform Server running on port ${PORT}`);
-    console.log(`📡 Socket.io ready`);
+    console.log(`🔄 Realtime via HTTP polling (Vercel-safe, no socket.io)`);
     console.log(`🌐 Client URL: ${process.env.CLIENT_URL}`);
   });
 }
@@ -201,6 +181,7 @@ if (!process.env.VERCEL) {
 export default app;
 
 // ─── Graceful Shutdown ──────────────────────────────────────────
+// Students detect ended sessions via GET /api/live/active/me polling (session -> null/ended).
 const gracefulShutdown = async (signal) => {
   console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
   try {
@@ -210,24 +191,12 @@ const gracefulShutdown = async (signal) => {
     for (const session of activeSessions) {
       session.status = 'ended';
       session.endedAt = new Date();
+      session.activePing = undefined;
       await session.save();
-      if (session.group) {
-        io.to(`group:${session.group}`).emit('broadcast-ended', { sessionId: session._id });
-      }
-      // الجلسات الفردية بلا مجموعة — إشعار مباشر للطالب
-      if (session.student) {
-        io.emitToUser(session.student.toString(), 'broadcast-ended', { sessionId: session._id });
-      }
     }
     if (activeSessions.length > 0) {
       console.log(`  📴 Ended ${activeSessions.length} active live sessions`);
     }
-
-    // Notify all connected sockets
-    io.emit('server-shutdown', { message: 'Server is restarting' });
-
-    // Close Socket.io
-    io.close();
 
     // Close HTTP server
     server.close(() => {

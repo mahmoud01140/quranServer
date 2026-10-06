@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   getPlacementExam, getGroupExams, createExam, updateExam, deleteExam,
+  assignExamToLesson,
   submitExam, submitOralExam, submitRecitationAnswers,
   getStudentResults, getResultById,
   getGroupResults, getExamResults,
@@ -38,6 +39,7 @@ router.put('/results/:resultId/review', teacherOnly, reviewOralResult);
 router.get('/group/:groupId', getGroupExams);
 router.get('/group/:groupId/results', adminOnly, getGroupResults);   // Admin sees all results per group
 router.post('/', teacherOnly, createExam);                             // Admin + Teacher can create
+router.post('/:id/assign-lesson', teacherOnly, assignExamToLesson); // إسناد امتحان بنك لطالب: حصة فردية أو مباشر
 router.put('/:id', teacherOnly, updateExam);
 router.delete('/:id', teacherOnly, deleteExam);                        // Admin + Teacher can delete
 

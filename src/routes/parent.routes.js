@@ -3,17 +3,23 @@ import {
   getChildren,
   linkChild,
   unlinkChild,
-  getChildProgress
+  getChildProgress,
+  getMyLinkCode,
+  regenerateLinkCode,
 } from '../controllers/parent.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 import { requireRole } from '../middleware/role.middleware.js';
 
 const router = express.Router();
 
-// Guard all routes with authentication and check that role is parent
 router.use(protect);
-router.use(requireRole('parent'));
 
+// Student endpoints to get or regenerate their link code
+router.get('/my-link-code', getMyLinkCode);
+router.post('/regenerate-link-code', regenerateLinkCode);
+
+// Parent only endpoints
+router.use(requireRole('parent'));
 router.get('/children', getChildren);
 router.post('/children', linkChild);
 router.delete('/children/:id', unlinkChild);

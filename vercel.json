@@ -11,5 +11,16 @@
       "src": "/(.*)",
       "dest": "src/server.js"
     }
+  ],
+  "functions": {
+    "src/server.js": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/maintenance/cleanup",
+      "schedule": "0 3 * * *"
+    }
   ]
 }

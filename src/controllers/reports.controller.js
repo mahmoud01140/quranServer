@@ -381,6 +381,31 @@ export const getStudentReport = async (req, res) => {
       results: examList,
     };
 
+    // ——— قسم التسميع والورد (تقييمات المعلم وملاحظاته) ———
+    const DailyTask = (await import('../models/DailyTask.js')).default;
+    const wirdTasks = await DailyTask.find({ student: student._id })
+      .populate('reviewedBy', 'firstName lastName')
+      .sort({ date: -1, createdAt: -1 })
+      .limit(14)
+      .lean();
+    const portionText = (p) =>
+      p?.surahName ? `سورة ${p.surahName} · الآيات (${p.fromVerse} - ${p.toVerse})` : '';
+    sections.recitation = {
+      total: wirdTasks.length,
+      evaluated: wirdTasks.filter(t => t.overallStatus === 'reviewed').length,
+      history: wirdTasks.map(t => ({
+        date: t.date || t.createdAt,
+        newHifz: portionText(t.newHifz),
+        newHifzScore: t.newHifz?.score ?? null,
+        nearRevision: portionText(t.nearRevision),
+        nearRevisionScore: t.nearRevision?.score ?? null,
+        status: t.overallStatus || 'pending',
+        teacherNotes: t.teacherNotes || '',
+        reviewedBy:
+          t.reviewedBy ? `${t.reviewedBy.firstName || ''} ${t.reviewedBy.lastName || ''}`.trim() : '',
+      })),
+    };
+
     // ——— أقسام مستقبلية: أضف هنا (مثال: sections.lessons / sections.payments) ———
 
     res.json({

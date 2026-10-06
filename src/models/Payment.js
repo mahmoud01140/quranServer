@@ -19,6 +19,9 @@ const paymentSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  // الدفع بالجنيه المصري فقط — تُبقى القيم القديمة (SAR/USD) في الـ enum
+  // حتى تظل المدفوعات التاريخية قابلة للقراءة والحفظ عند المراجعة،
+  // بينما تُفرض 'EGP' على كل المدفوعات الجديدة في submitPaymentRequest.
   currency: {
     type: String,
     enum: ['EGP', 'SAR', 'USD'],
@@ -43,10 +46,14 @@ const paymentSchema = new mongoose.Schema({
     trim: true,
   },
   // Proof of payment
+  // receiptPublicId/ResourceType power the auto-cleanup job that deletes the
+  // receipt image 30 days after admin review (record metadata is kept).
+  // Not required: the cleanup job nulls it after retention, and the record stays.
   receiptUrl: {
     type: String,
-    required: true,
   },
+  receiptPublicId: { type: String },
+  receiptResourceType: { type: String },
   // Review Status
   status: {
     type: String,
@@ -73,6 +80,11 @@ const paymentSchema = new mongoose.Schema({
     trim: true,
   },
 }, { timestamps: true });
+
+// findOne({ user, status:'pending' }) + student history;
+// admin lists filter by status and sort by createdAt.
+paymentSchema.index({ user: 1, status: 1 });
+paymentSchema.index({ status: 1, createdAt: -1 });
 
 const Payment = mongoose.model('Payment', paymentSchema);
 export default Payment;

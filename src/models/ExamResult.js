@@ -20,9 +20,14 @@ const examResultSchema = new mongoose.Schema({
   writtenPercentage: { type: Number, default: 0 },
 
   // Oral recordings
+  // audioPublicId/audioResourceType power the auto-cleanup job that deletes
+  // recordings from storage 1 day after admin review (audioUrl is nulled then,
+  // scores and notes are kept).
   oralRecordings: [{
     taskId:       { type: mongoose.Schema.Types.Mixed },
     audioUrl:     { type: String },
+    audioPublicId: { type: String },
+    audioResourceType: { type: String },
     teacherScore: { type: Number },
     teacherNotes: { type: String },
     teacherAudioUrl: { type: String }, // Voice feedback from teacher for this question
@@ -69,6 +74,9 @@ const examResultSchema = new mongoose.Schema({
 
 // Prevent duplicate exam submissions at database level
 examResultSchema.index({ exam: 1, student: 1 }, { unique: true });
+// Student history queries: find({ student }).sort({ createdAt: -1 })
+// (exam-led queries are already served by the unique compound prefix above)
+examResultSchema.index({ student: 1, createdAt: -1 });
 
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
 export default ExamResult;

@@ -12,6 +12,19 @@ export const getSecureLiveRoomName = (sessionId) => {
   return `quran_${hash}`;
 };
 
+// Vercel-safe polling helper: hide expired roll-call pings instead of pushing via socket.io.
+// Expired pings are nulled in the response (lazy cleanup; no extra DB write on hot read paths).
+const sanitizeActivePing = (sessionObj) => {
+  if (sessionObj?.activePing?.expiresAt) {
+    if (new Date(sessionObj.activePing.expiresAt) < new Date()) {
+      sessionObj.activePing = null;
+    }
+  } else if (sessionObj) {
+    sessionObj.activePing = sessionObj.activePing || null;
+  }
+  return sessionObj;
+};
+
 
 // GET /api/live/group/:groupId
 export const getGroupSessions = async (req, res) => {
@@ -83,9 +96,8 @@ export const createSession = async (req, res) => {
       quranHomework: finalQuranHomework,
     });
 
-    // Notify group students
+    // Notify group students (DB + Web Push; frontend picks up via HTTP polling — Vercel-safe)
     const group = await Group.findById(groupId).populate('students', 'pushSubscription firstName');
-    const io = req.app.get('io');
 
     const notifications = group.students.map(student =>
       Notification.create({
@@ -97,10 +109,6 @@ export const createSession = async (req, res) => {
       })
     );
     await Promise.all(notifications);
-
-    group.students.forEach(student => {
-      if (io) io.emitToUser(student._id, 'session-scheduled', { sessionId: session._id });
-    });
 
     const sessionObj = session.toObject ? session.toObject() : { ...session };
     sessionObj.liveRoomName = getSecureLiveRoomName(session._id);
@@ -126,6 +134,7 @@ export const getActiveSession = async (req, res) => {
       if (indSession) {
         const sessionObj = indSession.toObject ? indSession.toObject() : { ...indSession };
         sessionObj.liveRoomName = getSecureLiveRoomName(indSession._id);
+        sanitizeActivePing(sessionObj);
         subStatus.canAccessLiveSession = true;
         return res.json({ session: sessionObj, subscription: subStatus });
       }
@@ -152,6 +161,7 @@ export const getActiveSession = async (req, res) => {
       if (groupSession) {
         const sessionObj = groupSession.toObject ? groupSession.toObject() : { ...groupSession };
         sessionObj.liveRoomName = getSecureLiveRoomName(groupSession._id);
+        sanitizeActivePing(sessionObj);
         const alreadyAttended = groupSession.attendees?.some(
           a => (a.student?._id || a.student)?.toString() === user._id.toString()
         );
@@ -173,6 +183,7 @@ export const getActiveSession = async (req, res) => {
     if (hostSession) {
       const sessionObj = hostSession.toObject ? hostSession.toObject() : { ...hostSession };
       sessionObj.liveRoomName = getSecureLiveRoomName(hostSession._id);
+      sanitizeActivePing(sessionObj);
       return res.json({ session: sessionObj, subscription: subStatus });
     }
 
@@ -214,6 +225,7 @@ export const getSessionById = async (req, res) => {
 
     const sessionObj = session.toObject ? session.toObject() : { ...session };
     sessionObj.liveRoomName = getSecureLiveRoomName(session._id);
+    sanitizeActivePing(sessionObj);
 
     res.json({ session: sessionObj, subscription: subStatus });
   } catch (error) {
@@ -238,20 +250,12 @@ export const startSession = async (req, res) => {
 
     session.status = 'live';
     session.startedAt = new Date();
-    session.teacherSocketId = req.body.teacherSocketId || '';
+    // Clear any stale roll-call ping when (re)starting — Vercel-safe polling replaces socket.io
+    session.activePing = undefined;
     await session.save();
 
-    const io = req.app.get('io');
-    if (io && session.group?._id) {
-      io.to(`group:${session.group._id}`).emit('broadcast-started', {
-        sessionId: session._id,
-        teacherSocketId: req.body.teacherSocketId,
-        teacherId: req.user._id,
-        title: session.title,
-      });
-    }
-
     // Send live notifications (group sessions only; individual notifies at creation)
+    // Students discover the live session via GET /api/live/active/me polling (no socket.io).
     if (session.group?._id) {
       const group = await Group.findById(session.group._id).populate('students', 'pushSubscription');
       await Promise.allSettled(
@@ -290,18 +294,11 @@ export const endSession = async (req, res) => {
     session.status = 'ended';
     session.endedAt = new Date();
     if (req.body.recordingUrl) session.recordingUrl = req.body.recordingUrl;
+    // Clear roll-call ping on end — students see ended status via polling GET /active/me
+    session.activePing = undefined;
     await session.save();
 
     const targetGroupId = session.group?._id || session.group;
-    const io = req.app.get('io');
-    if (io) {
-      if (targetGroupId) {
-        io.to(`group:${targetGroupId}`).emit('broadcast-ended', { sessionId: session._id });
-      }
-      if (session.student) {
-        io.emitToUser(session.student.toString(), 'broadcast-ended', { sessionId: session._id });
-      }
-    }
 
     // Update group total sessions if group session
     if (targetGroupId) {
@@ -351,15 +348,7 @@ export const endSession = async (req, res) => {
               session.quranHomework = lesson.defaultQuranHomework;
             }
             await session.save();
-
-            if (io) {
-              io.to(`group:${targetGroupId}`).emit('homework-updated', {
-                sessionId: session._id,
-                homework: session.homework,
-                quranHomework: session.quranHomework,
-                homeworkDeadline: session.homeworkDeadline,
-              });
-            }
+            // Students see homework via GET /api/live/:id polling — no socket.io needed.
           }
 
           // Sync student completed lessons for group students
@@ -501,22 +490,67 @@ export const joinSession = async (req, res) => {
   }
 };
 
-// POST /api/live/:id/chat
+// POST /api/live/:id/chat — Vercel-safe replacement for socket.io live-message.
+// Frontend polls GET /:id/chat?since= to receive new messages.
 export const sendChatMessage = async (req, res) => {
   try {
     const { message, type } = req.body;
-    const session = await LiveSession.findByIdAndUpdate(
-      req.params.id,
-      {
-        $push: {
-          chatMessages: { sender: req.user._id, message, type: type || 'text', sentAt: new Date() },
-        },
-      },
-      { new: true }
-    );
-    res.json({ message: 'تم إرسال الرسالة' });
+    const text = String(message || '').trim().substring(0, 2000);
+    if (!text) return res.status(400).json({ message: 'نص الرسالة مطلوب' });
+    const safeType = ['text', 'audio', 'question'].includes(type) ? type : 'text';
+    const chatMsg = { sender: req.user._id, message: text, type: safeType, sentAt: new Date() };
+    await LiveSession.findByIdAndUpdate(req.params.id, {
+      $push: { chatMessages: { $each: [chatMsg], $slice: -500 } },
+    });
+    res.json({ message: 'تم إرسال الرسالة', chatMessage: chatMsg });
   } catch (error) {
     res.status(500).json({ message: 'خطأ' });
+  }
+};
+
+// GET /api/live/:id/chat?since=ISO-date — incremental fetch for polling clients.
+export const getChatMessages = async (req, res) => {
+  try {
+    const session = await LiveSession.findById(req.params.id)
+      .select('chatMessages student group status')
+      .populate('chatMessages.sender', 'firstName lastName avatar');
+    if (!session) return res.status(404).json({ message: 'الجلسة غير موجودة' });
+    let messages = session.chatMessages || [];
+    // Keep payload small: last 100 by default, or only newer than `since`
+    if (req.query.since) {
+      const since = new Date(req.query.since);
+      if (!Number.isNaN(since.getTime())) {
+        messages = messages.filter((m) => new Date(m.sentAt) > since);
+      }
+    } else {
+      messages = messages.slice(-100);
+    }
+    res.json({ messages, count: messages.length });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في جلب الرسائل' });
+  }
+};
+
+// POST /api/live/:id/leave — HTTP replacement for socket.io leave-session/disconnect.
+// Marks attendees.leftAt for the caller (attendance duration tracking).
+export const leaveSession = async (req, res) => {
+  try {
+    const updated = await LiveSession.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        attendees: {
+          $elemMatch: {
+            student: req.user._id,
+            $or: [{ leftAt: { $exists: false } }, { leftAt: null }],
+          },
+        },
+      },
+      { $set: { 'attendees.$.leftAt': new Date() } },
+      { new: true }
+    ).select('_id attendees');
+    res.json({ message: 'تم تسجيل المغادرة', left: Boolean(updated) });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في تسجيل المغادرة' });
   }
 };
 
@@ -541,6 +575,7 @@ export const startGroupLiveSession = async (req, res) => {
     if (!group) return res.status(404).json({ message: 'المجموعة غير موجودة' });
 
     // Create a new live session
+    // Students discover it via GET /api/live/active/me polling (Vercel-safe, no socket.io).
     const session = await LiveSession.create({
       group: group._id,
       teacher: req.user._id,
@@ -548,20 +583,7 @@ export const startGroupLiveSession = async (req, res) => {
       sessionType: 'lesson',
       status: 'live',
       startedAt: new Date(),
-      teacherSocketId: req.body.teacherSocketId || '',
     });
-
-    const io = req.app.get('io');
-    if (io) {
-      io.to(`group:${group._id}`).emit('broadcast-started', {
-        sessionId: session._id,
-        roomId: group.liveRoomId,
-        teacherSocketId: req.body.teacherSocketId || '',
-        teacherId: req.user._id,
-        title: session.title,
-        groupId: group._id,
-      });
-    }
 
     // Send notifications to group students
     const notifications = group.students.map(student =>
@@ -738,14 +760,7 @@ export const saveAttendanceSheet = async (req, res) => {
 
     await session.save();
 
-    const io = req.app.get('io');
-    if (io && session.group?._id) {
-      io.to(`group:${session.group._id}`).emit('attendance-updated', {
-        sessionId: session._id,
-        records: updatedRecords,
-        updatedBy: { _id: req.user._id, name: `${req.user.firstName} ${req.user.lastName}` }
-      });
-    }
+    // Attendance sheet is read via GET /:id/attendance-sheet polling — no socket.io needed.
 
     // If notifyParents is true, notify linked parents of absent students
     let parentsNotifiedCount = 0;
@@ -795,23 +810,28 @@ export const saveAttendanceSheet = async (req, res) => {
 };
 
 // POST /api/live/:id/attendance-ping  (Admin / Teacher: Roll-Call trigger)
+// Vercel-safe: persists ping in DB; students poll GET /:id or /active/me (activePing) every ~5s.
 export const sendAttendancePing = async (req, res) => {
   try {
     const session = await LiveSession.findById(req.params.id);
     if (!session) return res.status(404).json({ message: 'الجلسة غير موجودة' });
 
     const pingId = Date.now().toString();
-    const io = req.app.get('io');
-    if (io) {
-      io.to(`group:${session.group}`).emit('attendance-ping', {
-        sessionId: session._id,
-        pingId,
-        message: '✋ نداء التحقق من التواجد! يرجى تأكيد حضورك الآن',
-        timeoutSeconds: 60
-      });
-    }
+    const now = new Date();
+    session.activePing = {
+      pingId,
+      message: '✋ نداء التحقق من التواجد! يرجى تأكيد حضورك الآن',
+      sentAt: now,
+      expiresAt: new Date(now.getTime() + 60 * 1000),
+      sentBy: req.user._id,
+    };
+    await session.save();
 
-    res.json({ message: 'تم إرسال نداء التحقق للطلاب بنجاح 🔔', pingId });
+    res.json({
+      message: 'تم إرسال نداء التحقق للطلاب بنجاح 🔔',
+      pingId,
+      activePing: session.activePing,
+    });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في إرسال نداء التحقق' });
   }
@@ -840,15 +860,6 @@ export const respondAttendancePong = async (req, res) => {
     }
 
     await session.save();
-
-    const io = req.app.get('io');
-    if (io) {
-      io.to(`group:${session.group}`).emit('attendance-pong-received', {
-        sessionId: session._id,
-        studentId,
-        studentName: `${req.user.firstName} ${req.user.lastName}`
-      });
-    }
 
     res.json({ message: 'تم تأكيد حضورك بنجاح ✅' });
   } catch (error) {
@@ -919,6 +930,66 @@ export const updateSharedMushaf = async (req, res) => {
   }
 };
 
+// ─── Subscription warning (advisory, non-blocking) ───────────────
+// Shared by the pre-start check endpoint and the start endpoint below.
+// Returns null when the student's subscription is fine.
+export const buildSubscriptionWarning = async (student) => {
+  try {
+    const subStatus = await evaluateUserSubscription(student);
+    const studentName = `${student.firstName || ''} ${student.lastName || ''}`.trim() || 'الطالب';
+    if (subStatus.isExpired) {
+      const endDate = student.subscription?.endDate ? new Date(student.subscription.endDate) : null;
+      const daysOverdue = endDate
+        ? Math.max(1, Math.ceil((Date.now() - endDate.getTime()) / (1000 * 60 * 60 * 24)))
+        : null;
+      return {
+        type: 'expired',
+        title: '⚠️ تنبيه: اشتراك الطالب منتهٍ',
+        message: daysOverdue
+          ? `انتهى اشتراك ${studentName} منذ ${daysOverdue} ${daysOverdue === 1 ? 'يوم' : daysOverdue === 2 ? 'يومين' : 'أيام'} ولم يجدده — هل تريد الاستمرار في البث معه؟`
+          : `اشتراك ${studentName} منتهٍ ولم يجدده — هل تريد الاستمرار في البث معه؟`,
+        daysOverdue,
+      };
+    }
+    if (subStatus.status !== 'active') {
+      return {
+        type: 'not_subscribed',
+        title: '⚠️ تنبيه: الطالب غير مشترك',
+        message: subStatus.isTrial
+          ? `${studentName} غير مشترك بعد — يحضر ضمن الفترة التجريبية (${subStatus.trialSessionsAttended || 0} من ${subStatus.trialSessionsAllowed || 1}). هل تريد الاستمرار في البث معه؟`
+          : `${studentName} ليس لديه اشتراك مدفوع — هل تريد الاستمرار في البث معه؟`,
+        trialSessionsAttended: subStatus.trialSessionsAttended,
+        trialSessionsAllowed: subStatus.trialSessionsAllowed,
+      };
+    }
+    if (subStatus.isExpiringSoon) {
+      return {
+        type: 'expiring_soon',
+        title: '⏳ تنبيه: اشتراك الطالب يقترب من الانتهاء',
+        message: `ينتهي اشتراك ${studentName} خلال ${subStatus.daysRemaining} ${subStatus.daysRemaining === 1 ? 'يوم' : subStatus.daysRemaining === 2 ? 'يومين' : 'أيام'} — ذكّره بالتجديد.`,
+        daysRemaining: subStatus.daysRemaining,
+      };
+    }
+    return null;
+  } catch (_) {
+    // Warning is advisory only — never fail the caller because of it
+    return null;
+  }
+};
+
+// GET /api/live/student/:studentId/subscription-check (admin/teacher)
+// Pre-start check: lets the starter confirm before creating the session.
+export const checkStudentSubscription = async (req, res) => {
+  try {
+    const student = await User.findById(req.params.studentId);
+    if (!student) return res.status(404).json({ message: 'الطالب غير موجود' });
+    const subscriptionWarning = await buildSubscriptionWarning(student);
+    res.json({ subscriptionWarning });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في فحص الاشتراك' });
+  }
+};
+
 // POST /api/live/student/:studentId/start — start 1-on-1 live session with student
 export const startStudentLiveSession = async (req, res) => {
   try {
@@ -977,8 +1048,7 @@ export const startStudentLiveSession = async (req, res) => {
     createdLesson.completedBySessionId = session._id;
     await plan.save();
 
-    // Notify student via socket & push
-    const io = req.app.get('io');
+    // Notify student via DB + Web Push (student polls GET /api/live/active/me — no socket.io)
     const notification = await Notification.create({
       recipient: studentId,
       type: 'live_starting',
@@ -987,17 +1057,6 @@ export const startStudentLiveSession = async (req, res) => {
       data: { sessionId: session._id, link: '/student/live' },
     });
 
-    if (io) {
-      // حدث واحد فقط للفردي (live-started) — منع الجلب المكرر عند الطالب
-      io.emitToUser(studentId.toString(), 'live-started', {
-        sessionId: session._id,
-        roomId: session.roomId,
-        lessonId: createdLesson._id,
-        title: lessonTitle,
-      });
-      io.emitToUser(studentId.toString(), 'notification', notification);
-    }
-
     if (student.pushSubscription) {
       sendWebPush(student.pushSubscription, notification.title, notification.body).catch(() => {});
     }
@@ -1005,11 +1064,15 @@ export const startStudentLiveSession = async (req, res) => {
     const sessionObj = session.toObject ? session.toObject() : { ...session };
     sessionObj.liveRoomName = getSecureLiveRoomName(session._id);
 
+    // Advisory only — never fails session creation
+    const subscriptionWarning = await buildSubscriptionWarning(student);
+
     res.status(201).json({
       message: 'تم بدء البث المباشر مع الطالب وإنشاء الدرس بنجاح',
       session: sessionObj,
       lessonId: createdLesson._id,
       planId: plan._id,
+      subscriptionWarning,
     });
   } catch (error) {
     console.error('Error starting student live session:', error);

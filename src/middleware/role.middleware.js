@@ -15,6 +15,7 @@ export const requireRole = (...roles) => {
 export const adminOnly = requireRole('admin');
 export const teacherOnly = requireRole('teacher', 'admin');
 export const studentOnly = requireRole('student', 'admin');
+export const authorize = requireRole;
 
 export const requireApproved = (req, res, next) => {
   if (!req.user.isApproved && req.user.role === 'student') {

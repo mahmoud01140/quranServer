@@ -75,9 +75,13 @@ export const updatePortionStatus = async (req, res) => {
   }
 };
 
-// PUT /api/daily-tasks/:id/review  (Teacher reviews and scores all 3 pillars)
+// PUT /api/daily-tasks/:id/review  (Teacher/Admin reviews and scores the recitation)
 export const reviewDailyTask = async (req, res) => {
   try {
+    // التقييم للمشرف فقط — الطالب يحدّث حالته عبر /:id/portion
+    if (!['admin', 'teacher'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'تقييم التسميع متاح للمعلم والمشرف فقط' });
+    }
     const {
       newHifzScore,
       nearRevisionScore,
@@ -111,6 +115,52 @@ export const reviewDailyTask = async (req, res) => {
     res.json({ message: 'تم حفظ تقييم الورد القرآني بنجاح ⭐', task });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في مراجعة الورد' });
+  }
+};
+
+// GET /api/daily-tasks/student/:studentId/today (staff: today's task for live evaluation)
+export const getStudentTodayTask = async (req, res) => {
+  try {
+    if (!['admin', 'teacher'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'غير مصرح' });
+    }
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+
+    const task = await DailyTask.findOne({
+      student: req.params.studentId,
+      date: { $gte: startOfToday, $lte: endOfToday },
+    }).populate('reviewedBy', 'firstName lastName');
+
+    res.json({ task });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في جلب ورد الطالب' });
+  }
+};
+
+// GET /api/daily-tasks/student/:studentId/previous (staff: required recitation)
+// الورد المطلوب تسميعه = آخر ورد مُسند قبل اليوم (أي ورد البث السابق).
+// يُستبعد ورد اليوم حتى لو أُسند أثناء البث الحالي — المطلوب تسميعه هو السابق.
+export const getPreviousTask = async (req, res) => {
+  try {
+    if (!['admin', 'teacher'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'غير مصرح' });
+    }
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const task = await DailyTask.findOne({
+      student: req.params.studentId,
+      date: { $lt: startOfToday },
+    })
+      .populate('reviewedBy', 'firstName lastName')
+      .sort({ date: -1, createdAt: -1 });
+
+    res.json({ task });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في جلب الورد السابق' });
   }
 };
 
@@ -223,6 +273,16 @@ export const assignStudentDailyTask = async (req, res) => {
 
     if (teacherNotes !== undefined) {
       task.teacherNotes = teacherNotes;
+    }
+
+    // مسح انتقائي: إسناد مستقل لكل ركن — إلغاء تفعيل ركن في النافذة
+    // يمسحه من ورد اليوم (بدل بقاء القيمة القديمة)، فيرى الطالب المطلوب فقط.
+    // clearNewHifz / clearNearRevision: true لمسح الركن.
+    if (req.body.clearNewHifz === true) {
+      task.newHifz = { status: 'pending' };
+    }
+    if (req.body.clearNearRevision === true) {
+      task.nearRevision = { status: 'pending' };
     }
 
     task.reviewedBy = req.user._id;

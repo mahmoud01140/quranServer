@@ -6,6 +6,8 @@ import {
   getGroupTodayTasks,
   assignStudentDailyTask,
   assignWeeklyPlan,
+  getStudentTodayTask,
+  getPreviousTask,
 } from '../controllers/dailyTask.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 
@@ -18,5 +20,8 @@ router.put('/:id/review', reviewDailyTask);
 router.get('/group/:groupId/today', getGroupTodayTasks);
 router.put('/student/:studentId/assign', assignStudentDailyTask);
 router.post('/student/:studentId/weekly-plan', assignWeeklyPlan);
+// ورد الطالب اليوم + الورد السابق (المطلوب تسميعه) — للمشرف أثناء البث
+router.get('/student/:studentId/today', getStudentTodayTask);
+router.get('/student/:studentId/previous', getPreviousTask);
 
 export default router;

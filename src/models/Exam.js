@@ -45,7 +45,7 @@ const examSchema = new mongoose.Schema({
   },
   targetType: {
     type: String,
-    enum: ['level', 'group', 'individual'],
+    enum: ['level', 'group', 'individual', 'bank'],
     default: 'group',
   },
   targetStudent: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

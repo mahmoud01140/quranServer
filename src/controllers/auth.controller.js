@@ -1,4 +1,4 @@
-import User from '../models/User.js';
+import User, { normalizePhone } from '../models/User.js';
 import ExamResult from '../models/ExamResult.js';
 import { generateToken, setTokenCookie, clearTokenCookie } from '../utils/jwt.js';
 import { sendPasswordResetEmail } from '../utils/email.js';
@@ -13,25 +13,33 @@ export const register = async (req, res) => {
     if (!firstName?.trim() || !lastName?.trim()) {
       return res.status(400).json({ message: 'الاسم الأول واسم العائلة مطلوبان' });
     }
-    if (!email?.trim()) {
-      return res.status(400).json({ message: 'البريد الإلكتروني مطلوب' });
+    // الهاتف هو معرّف الدخول الأساسي — مطلوب وفريد
+    const normalizedPhone = normalizePhone(phone);
+    if (!normalizedPhone) {
+      return res.status(400).json({ message: 'رقم الهاتف مطلوب — أدخل رقماً مصرياً صالحاً (01xxxxxxxxx)' });
     }
     if (!password || password.length < 6) {
       return res.status(400).json({ message: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' });
     }
 
-    // Normalize email
-    const normalizedEmail = email.trim().toLowerCase();
+    // البريد اختياري (للاستعادة فقط) — يُقبل فارغاً
+    const normalizedEmail = email?.trim() ? email.trim().toLowerCase() : undefined;
 
-    const existingUser = await User.findOne({ email: normalizedEmail });
+    const existingUser = await User.findOne({
+      $or: [{ phone: normalizedPhone }, ...(normalizedEmail ? [{ email: normalizedEmail }] : [])],
+    });
     if (existingUser) {
-      return res.status(400).json({ message: 'البريد الإلكتروني مسجل مسبقاً' });
+      return res.status(400).json({
+        message: existingUser.phone === normalizedPhone
+          ? 'رقم الهاتف مسجل مسبقاً — سجل الدخول مباشرة'
+          : 'البريد الإلكتروني مسجل مسبقاً',
+      });
     }
 
     const user = await User.create({
       firstName: firstName.trim(), lastName: lastName.trim(),
       email: normalizedEmail, password,
-      phone: phone?.trim(), country, dateOfBirth, gender,
+      phone: normalizedPhone, country, dateOfBirth, gender,
       role: role === 'parent' ? 'parent' : 'student',
       isApproved: role === 'parent' ? true : false,
       // Email verification removed permanently: accounts are active immediately.
@@ -50,30 +58,50 @@ export const register = async (req, res) => {
     console.error('Register error:', error);
     // Handle duplicate key error specifically
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'البريد الإلكتروني مسجل مسبقاً' });
+      const field = Object.keys(error.keyPattern || {})[0];
+      return res.status(400).json({
+        message: field === 'phone' ? 'رقم الهاتف مسجل مسبقاً — سجل الدخول مباشرة' : 'البريد الإلكتروني مسجل مسبقاً',
+      });
     }
     res.status(500).json({ message: 'خطأ في التسجيل' });
   }
 };
 
-// POST /api/auth/login
+// POST /api/auth/login — الدخول برقم الهاتف أو البريد الإلكتروني
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    // identifier جديد يقبل الهاتف أو البريد — وemail القديمة ما زالت مدعومة للتوافق
+    const identifier = (req.body.identifier ?? req.body.email)?.trim?.() ?? req.body.identifier ?? req.body.email;
+    const { password } = req.body;
 
-    if (!email?.trim() || !password) {
-      return res.status(400).json({ message: 'البريد الإلكتروني وكلمة المرور مطلوبان' });
+    if (!identifier || typeof identifier !== 'string' || !identifier.trim() || !password) {
+      return res.status(400).json({ message: 'رقم الهاتف أو البريد الإلكتروني وكلمة المرور مطلوبان' });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
-    const user = await User.findOne({ email: normalizedEmail }).select('+password');
+    const idTrimmed = identifier.trim();
+    let user = null;
+    if (idTrimmed.includes('@')) {
+      user = await User.findOne({ email: idTrimmed.toLowerCase() }).select('+password');
+    } else {
+      const normalizedPhone = normalizePhone(idTrimmed);
+      if (normalizedPhone) {
+        user = await User.findOne({ phone: normalizedPhone }).select('+password');
+      }
+      // توافق: جرّب المطابقة الخام للهواتف القديمة غير الموحدة قبل رفض الدخول
+      if (!user) {
+        const rawDigits = idTrimmed.replace(/[^\d]/g, '');
+        user = await User.findOne({
+          $or: [{ phone: idTrimmed }, { phone: rawDigits }],
+        }).select('+password');
+      }
+    }
     if (!user) {
-      return res.status(401).json({ message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
+      return res.status(401).json({ message: 'بيانات الدخول غير صحيحة' });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
+      return res.status(401).json({ message: 'بيانات الدخول غير صحيحة' });
     }
 
     if (!user.isActive) {
@@ -114,8 +142,16 @@ export const getMe = async (req, res) => {
 // POST /api/auth/forgot-password
 export const forgotPassword = async (req, res) => {
   try {
-    const { email } = req.body;
-    const normalizedEmail = email?.trim().toLowerCase();
+    // يقبل البريد (إرسال رابط) أو رقم الهاتف (توجيه للإدارة — لا SMS مدفوع)
+    const identifier = (req.body.identifier ?? req.body.email)?.trim?.() ?? '';
+    if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
+      return res.status(400).json({ message: 'أدخل رقم الهاتف أو البريد الإلكتروني' });
+    }
+    const idTrimmed = identifier.trim();
+    if (!idTrimmed.includes('@')) {
+      return res.json({ message: 'لاستعادة الحساب برقم الهاتف تواصل مع الإدارة لتعيين كلمة مرور جديدة لك' });
+    }
+    const normalizedEmail = idTrimmed.toLowerCase();
     const user = await User.findOne({ email: normalizedEmail });
 
     // Always return success to prevent email enumeration
@@ -129,7 +165,7 @@ export const forgotPassword = async (req, res) => {
     await user.save();
 
     const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
-    await sendPasswordResetEmail(email, resetUrl, user.firstName);
+    await sendPasswordResetEmail(normalizedEmail, resetUrl, user.firstName);
 
     res.json({ message: 'تم إرسال رابط إعادة التعيين إلى بريدك الإلكتروني' });
   } catch (error) {

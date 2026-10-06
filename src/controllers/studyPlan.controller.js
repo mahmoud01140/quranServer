@@ -337,3 +337,38 @@ export const updateStudentCustomLesson = async (req, res) => {
   }
 };
 
+// DELETE /api/study-plans/student/:studentId/lessons/:lessonId — admin/teacher deletes a student's lesson
+export const deleteStudentCustomLesson = async (req, res) => {
+  try {
+    const { studentId, lessonId } = req.params;
+    const plan = await StudyPlan.findOne({ student: studentId, type: 'individual' });
+    if (!plan) return res.status(404).json({ message: 'خطة الطالب غير موجودة' });
+
+    const lesson = plan.customLessons.id(lessonId);
+    if (!lesson) return res.status(404).json({ message: 'الدرس غير موجود' });
+
+    const lessonTitle = lesson.title;
+    plan.customLessons = plan.customLessons.filter(l => l._id.toString() !== lessonId);
+    // Re-number remaining lessons
+    plan.customLessons.forEach((l, i) => { l.lessonNumber = i + 1; l.order = i + 1; });
+    await plan.save();
+
+    // Cleanup dangling references (best-effort, never fail the delete)
+    try {
+      const User = (await import('../models/User.js')).default;
+      await User.updateOne(
+        { _id: studentId },
+        { $pull: { completedLessons: lesson._id } }
+      );
+    } catch (_) {}
+    try {
+      const Discussion = (await import('../models/Discussion.js')).default;
+      await Discussion.deleteOne({ lessonId: lessonId.toString() });
+    } catch (_) {}
+
+    res.json({ message: `تم حذف الدرس "${lessonTitle || ''}" بنجاح`, plan });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في حذف الدرس' });
+  }
+};
+

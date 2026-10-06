@@ -19,8 +19,10 @@ const subscriptionSchema = new mongoose.Schema({
 const userSchema = new mongoose.Schema({
   firstName: { type: String, required: true, trim: true },
   lastName:  { type: String, required: true, trim: true },
-  email:     { type: String, required: true, unique: true, lowercase: true, trim: true },
-  phone:     { type: String, trim: true },
+  // البريد اختياري (يُستخدم للاستعادة) — sparse حتى لا تتعارض الحسابات بلا بريد
+  email:     { type: String, unique: true, sparse: true, lowercase: true, trim: true },
+  // الهاتف هو معرّف الدخول الأساسي — فريد، والحسابات القديمة بلا هاتف تبقى صالحة (sparse)
+  phone:     { type: String, unique: true, sparse: true, trim: true },
   password:  { type: String, required: true, minlength: 6 },
   country:   { type: String },
   dateOfBirth: { type: Date },
@@ -30,6 +32,8 @@ const userSchema = new mongoose.Schema({
   role:             { type: String, enum: ['student', 'teacher', 'admin', 'parent'], default: 'student' },
   registrationType: { type: String, enum: ['student', 'teacher', 'senior'] },
   children:         [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  parentLinkCode:   { type: String, index: true },
+  parentLinkCodeExpires: { type: Date },
 
   isVerified: { type: Boolean, default: true },
   isActive:   { type: Boolean, default: true },
@@ -86,8 +90,27 @@ const userSchema = new mongoose.Schema({
   }],
 }, { timestamps: true });
 
+/**
+ * توحيد أرقام الهواتف المصرية إلى الصيغة المحلية: 01xxxxxxxxx
+ * يقبل: 01xxxxxxxxx / +201xxxxxxxxx / 00201xxxxxxxxx / مسافات وشرطات.
+ * يُرجع null عندما لا يطابق رقماً مصرياً صالحاً (010/011/012/015).
+ */
+export const normalizePhone = (raw) => {
+  if (!raw || typeof raw !== 'string') return null;
+  let digits = raw.replace(/[^\d]/g, '');
+  if (digits.startsWith('0020')) digits = digits.slice(4);
+  else if (digits.startsWith('20') && digits.length === 12) digits = digits.slice(2);
+  if (digits.length === 10 && digits.startsWith('1')) digits = `0${digits}`;
+  if (!/^01[0125]\d{8}$/.test(digits)) return null;
+  return digits;
+};
+
 // Hash password before save
 userSchema.pre('save', async function (next) {
+  if (this.isModified('phone') && this.phone) {
+    const normalized = normalizePhone(this.phone);
+    if (normalized) this.phone = normalized;
+  }
   if (!this.isModified('password')) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();

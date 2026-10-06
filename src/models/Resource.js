@@ -8,6 +8,10 @@ const resourceSchema = new mongoose.Schema({
 
   // File info
   fileUrl: { type: String, required: true },
+  filePublicId: { type: String },       // Cloudinary public_id
+  fileResourceType: { type: String },   // Cloudinary resource_type
+  driveFileId: { type: String },        // Google Drive file ID
+  storageProvider: { type: String, enum: ['cloudinary', 'google_drive', 'local'], default: 'cloudinary' },
   fileName: { type: String },
   fileType: { type: String, enum: ['pdf', 'video', 'audio', 'image', 'other'], default: 'other' },
   fileSize: { type: Number }, // bytes

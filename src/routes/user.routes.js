@@ -2,7 +2,7 @@ import express from 'express';
 import {
   getAllUsers, getUserById, updateUser, deleteUser,
   getPendingApproval, getUnassignedStudents, getStudentsList, getScheduleMap,
-  approveUser, updatePushSubscription, getMyAttendanceStats
+  approveUser, resetUserPassword, updatePushSubscription, getMyAttendanceStats
 } from '../controllers/user.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 import { adminOnly, teacherOnly, requireRole } from '../middleware/role.middleware.js';
@@ -21,6 +21,7 @@ router.get('/:id', getUserById);
 router.put('/:id', updateUser);
 router.delete('/:id', adminOnly, deleteUser);
 router.put('/:id/approve', adminOnly, approveUser);
+router.put('/:id/reset-password', adminOnly, resetUserPassword);
 router.put('/:id/push-subscription', updatePushSubscription);
 
 export default router;

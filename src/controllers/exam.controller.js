@@ -3,9 +3,10 @@ import Exam from '../models/Exam.js';
 import ExamResult from '../models/ExamResult.js';
 import User from '../models/User.js';
 import Group from '../models/Group.js';
+import StudyPlan from '../models/StudyPlan.js';
 import WeakPoint from '../models/WeakPoint.js';
 import Notification from '../models/Notification.js';
-import { getFileUrl } from '../middleware/upload.middleware.js';
+import { getFileUrl, buildDirectRecordings } from '../middleware/upload.middleware.js';
 import { sendWebPush } from '../utils/webpush.js';
 
 // Helper: Strip answer keys from questions before sending to students
@@ -212,22 +213,30 @@ export const createExam = async (req, res) => {
       examType = targetType === 'level' ? 'placement' : 'lesson';
     }
 
+    const isBank = targetType === 'bank';
     const examData = {
       ...req.body,
       targetType: targetType || 'group',
+      // امتحان البنك: مستقل تماماً — بلا طالب ولا مجموعة ولا مستوى، ومخفي عن الطلاب حتى يُسند
       targetStudent: targetType === 'individual' ? targetStudent : undefined,
       group: (targetType === 'group' || targetType === 'individual') ? group : undefined,
       level: targetType === 'level' ? (level || 'all') : undefined,
       type: examType,
       createdBy: req.user._id,
     };
+    if (isBank) {
+      examData.targetStudent = undefined;
+      examData.group = undefined;
+      examData.level = undefined;
+      examData.lessonId = undefined;
+      examData.lessonTitle = '';
+    }
 
     // Calculate total points
     examData.totalPoints = (examData.questions || []).reduce((sum, q) => sum + (q.points || 1), 0);
     const exam = await Exam.create(examData);
 
-    // Send notifications to students
-    const io = req.app.get('io');
+    // Send notifications to students (DB; frontend polls GET /notifications — no socket.io)
     if (targetType === 'individual' && targetStudent) {
       await Notification.create({
         recipient: targetStudent,
@@ -236,7 +245,6 @@ export const createExam = async (req, res) => {
         body: 'أعد لك المعلم امتحاناً فردياً للمتابعة وتثبيت المحفوظ. تفضل بأدائه في قسم المطلوب منك.',
         data: { examId: exam._id, link: `/student/exams/${exam._id}/take` },
       });
-      if (io) io.emitToUser(targetStudent, 'exam-assigned', { examId: exam._id, title: exam.title, targetType: 'individual' });
     } else if (targetType === 'group' && group) {
       const groupDoc = await Group.findById(group).select('students');
       if (groupDoc && groupDoc.students?.length) {
@@ -250,7 +258,6 @@ export const createExam = async (req, res) => {
           })
         );
         await Promise.allSettled(notifs);
-        if (io) io.to(`group:${group}`).emit('exam-assigned', { examId: exam._id, title: exam.title, targetType: 'group' });
       }
     } else if (targetType === 'level') {
       const studentFilter = { role: 'student' };
@@ -270,12 +277,68 @@ export const createExam = async (req, res) => {
         );
         await Promise.allSettled(notifs);
       }
-      if (io) io.emit('exam-assigned', { examId: exam._id, title: exam.title, targetType: 'level' });
     }
 
     res.status(201).json({ message: 'تم إنشاء الامتحان بنجاح', exam });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في إنشاء الامتحان' });
+  }
+};
+
+// POST /api/exams/:id/assign-lesson — إسناد امتحان (بنك غالباً) لطالب: على حصة من خطته الفردية أو إسناد مباشر
+// body: { studentId, lessonId? } — بدون lessonId يتحول الامتحان لفردي مباشر للطالب
+export const assignExamToLesson = async (req, res) => {
+  try {
+    const { studentId, lessonId } = req.body;
+    if (!studentId) return res.status(400).json({ message: 'حدد الطالب أولاً' });
+
+    const exam = await Exam.findById(req.params.id);
+    if (!exam) return res.status(404).json({ message: 'الامتحان غير موجود' });
+
+    const student = await User.findById(studentId).select('firstName lastName role');
+    if (!student || student.role !== 'student') {
+      return res.status(404).json({ message: 'الطالب غير موجود' });
+    }
+
+    let lessonTitle = '';
+    if (lessonId) {
+      const plan = await StudyPlan.findOne({ student: studentId, type: 'individual' });
+      if (!plan) return res.status(404).json({ message: 'الخطة الفردية للطالب غير موجودة' });
+      const lesson = plan.customLessons.id(lessonId);
+      if (!lesson) return res.status(404).json({ message: 'الحصة غير موجودة في الخطة الفردية' });
+      lesson.exam = exam._id;
+      await plan.save();
+      lessonTitle = lesson.title || '';
+    }
+
+    // الامتحان يخرج من البنك: إسناد فردي للطالب فيظهر في «المطلوب منك»
+    exam.targetType = 'individual';
+    exam.targetStudent = studentId;
+    exam.group = undefined;
+    exam.level = undefined;
+    if (lessonId) {
+      exam.lessonId = lessonId;
+      exam.lessonTitle = lessonTitle;
+      exam.type = 'lesson';
+    }
+    await exam.save();
+
+    await Notification.create({
+      recipient: studentId,
+      type: 'exam',
+      title: `تم إسناد امتحان لك: ${exam.title}`,
+      body: lessonTitle
+        ? `أُضيف الامتحان على حصة «${lessonTitle}» في خطتك. تجده في قسم المطلوب منك.`
+        : 'أُسند لك امتحان جديد. تجده في قسم المطلوب منك.',
+      data: { examId: exam._id, link: `/student/exams/${exam._id}/take` },
+    });
+    // Student discovers via GET /notifications + exams polling (Vercel-safe, no socket.io).
+
+    const populated = await Exam.findById(exam._id)
+      .populate('targetStudent', 'firstName lastName avatar email');
+    res.json({ message: 'تم وضع الامتحان للطالب بنجاح', exam: populated });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في إسناد الامتحان' });
   }
 };
 
@@ -388,10 +451,23 @@ export const submitExam = async (req, res) => {
     else if (regType === 'senior') assignedLevel = 'senior';
     else if (writtenPercentage >= 70) assignedLevel = 'memorization';
 
-    // Normalize surveyAnswers
+    // Normalize surveyAnswers — enriched objects keep their texts (sanitized),
+    // bare indices stay index-only (old clients) and resolve at display time.
     const normalizedSurveyAnswers = Array.isArray(surveyAnswers)
       ? surveyAnswers.map((item, idx) => {
-          if (item !== null && typeof item === 'object') return item;
+          if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+            const clean = {
+              questionIndex: Number.isInteger(item.questionIndex) ? item.questionIndex : idx,
+              selectedOption: Number.isInteger(item.selectedOption) ? item.selectedOption : -1,
+            };
+            if (typeof item.questionText === 'string' && item.questionText.trim()) {
+              clean.questionText = item.questionText.trim().slice(0, 500);
+            }
+            if (typeof item.answerText === 'string' && item.answerText.trim()) {
+              clean.answerText = item.answerText.trim().slice(0, 500);
+            }
+            return clean;
+          }
           return {
             questionIndex: idx,
             selectedOption: typeof item === 'number' ? item : -1,
@@ -490,11 +566,7 @@ const notifyStaffOfPendingReview = async (req, { studentId, examId, examTitle, i
       body,
       data: { examId, studentId: studentId?.toString?.() || studentId },
     })));
-    const io = req.app.get('io');
-    if (io) {
-      if (teacherId) io.emitToUser(teacherId.toString(), 'review-pending', { examId, studentId });
-      io.emit('review-pending', { examId, studentId });
-    }
+    // Teachers/admins poll GET /notifications (no socket.io).
   } catch (_) {}
 };
 
@@ -504,10 +576,17 @@ export const submitOralExam = async (req, res) => {
     const { resultId } = req.body;
     const files = req.files || [];
 
-    const oralRecordings = files.map((file, idx) => ({
-      taskId: req.body[`taskId_${idx}`] || null,
-      audioUrl: getFileUrl(req, file.path),
-    }));
+    // Direct browser uploads (preferred on Vercel) arrive as verified URLs;
+    // legacy multipart files fall back to the server-relay path.
+    let oralRecordings = buildDirectRecordings(req.body?.recordings, 'taskId');
+    if (!oralRecordings.length) {
+      oralRecordings = files.map((file, idx) => ({
+        taskId: req.body[`taskId_${idx}`] || null,
+        audioUrl: getFileUrl(req, file.path),
+        audioPublicId: file.cloudinaryPublicId || undefined,
+        audioResourceType: file.cloudinaryResourceType || undefined,
+      }));
+    }
 
     let result = null;
     if (resultId) {
@@ -576,10 +655,17 @@ export const submitRecitationAnswers = async (req, res) => {
     const exam = await Exam.findById(req.params.id);
     if (!exam) return res.status(404).json({ message: 'الامتحان غير موجود' });
 
-    const oralRecordings = files.map((file, idx) => ({
-      taskId: req.body[`questionId_${idx}`] || null,
-      audioUrl: getFileUrl(req, file.path),
-    }));
+    // Direct browser uploads (preferred on Vercel) arrive as verified URLs;
+    // legacy multipart files fall back to the server-relay path.
+    let oralRecordings = buildDirectRecordings(req.body?.recordings, 'taskId');
+    if (!oralRecordings.length) {
+      oralRecordings = files.map((file, idx) => ({
+        taskId: req.body[`questionId_${idx}`] || null,
+        audioUrl: getFileUrl(req, file.path),
+        audioPublicId: file.cloudinaryPublicId || undefined,
+        audioResourceType: file.cloudinaryResourceType || undefined,
+      }));
+    }
 
     let result;
     if (examResultId) {
@@ -783,8 +869,7 @@ export const reviewOralResult = async (req, res) => {
       }
     }
 
-    // Notify student via socket + push
-    const io = req.app.get('io');
+    // Notify student via DB + Web Push (frontend polls GET /notifications — no socket.io)
     const notification = await Notification.create({
       recipient: result.student._id,
       type: 'result_ready',
@@ -794,7 +879,6 @@ export const reviewOralResult = async (req, res) => {
         : 'تمت مراجعة تقييمك الشفهي من قِبل المشرف. اطلع على الملاحظات والنتيجة الآن.',
       data: { resultId: result._id },
     });
-    if (io) io.emitToUser(result.student._id.toString(), 'result-ready', { resultId: result._id });
     if (result.student.pushSubscription) {
       await sendWebPush(result.student.pushSubscription, notification.title, notification.body);
     }

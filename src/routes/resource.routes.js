@@ -1,14 +1,16 @@
 import express from 'express';
-import { uploadResource, getGroupResources, getGeneralResources, trackDownload, deleteResource } from '../controllers/resource.controller.js';
+import { uploadResource as uploadController, getGroupResources, getGeneralResources, trackDownload, deleteResource } from '../controllers/resource.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
-import { uploadResource as uploadMiddleware } from '../middleware/upload.middleware.js';
 import { teacherOnly } from '../middleware/role.middleware.js';
 
 const router = express.Router();
 router.use(protect);
 
-// Upload (teacher/admin)
-router.post('/', teacherOnly, uploadMiddleware, uploadResource);
+// جميع رفع الملفات يتم Browser → Cloudinary مباشرة.
+// السيرفر يستقبل JSON فقط (fileUrl + metadata) — لا multipart، لا multer.
+
+// Upload (teacher/admin) — JSON body with fileUrl
+router.post('/', teacherOnly, uploadController);
 
 // Get general library (no group)
 router.get('/general', getGeneralResources);

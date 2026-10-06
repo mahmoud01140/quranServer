@@ -1,8 +1,8 @@
 import express from 'express';
 import {
   getGroupSessions, createSession, getSessionById, getActiveSession, getMySessions,
-  startSession, endSession, joinSession, sendChatMessage, getAttendees,
-  startGroupLiveSession, startStudentLiveSession,
+  startSession, endSession, joinSession, leaveSession, sendChatMessage, getChatMessages, getAttendees,
+  startGroupLiveSession, startStudentLiveSession, checkStudentSubscription,
   // Live Attendance Sheet System
   getAttendanceSheet, saveAttendanceSheet, sendAttendancePing, respondAttendancePong,
   // Shared mushaf (HTTP polling)
@@ -23,6 +23,7 @@ const allowAdminOrTeacher = (req, res, next) => {
 // Student individual sessions & Group sessions
 router.get('/active/me', getActiveSession);
 router.get('/mine', getMySessions);
+router.get('/student/:studentId/subscription-check', allowAdminOrTeacher, checkStudentSubscription);
 router.post('/student/:studentId/start', allowAdminOrTeacher, startStudentLiveSession);
 router.get('/group/:groupId', getGroupSessions);
 router.post('/group/:groupId/start', allowAdminOrTeacher, startGroupLiveSession);
@@ -33,7 +34,9 @@ router.get('/:id', getSessionById);
 router.put('/:id/start', allowAdminOrTeacher, startSession);
 router.put('/:id/end', allowAdminOrTeacher, endSession);
 router.put('/:id/join', joinSession);
+router.post('/:id/leave', leaveSession);
 router.post('/:id/chat', sendChatMessage);
+router.get('/:id/chat', getChatMessages);
 router.get('/:id/attendees', getAttendees);
 
 // Live Attendance Sheet & Roll-Call endpoints

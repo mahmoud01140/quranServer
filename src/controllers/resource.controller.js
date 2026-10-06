@@ -1,7 +1,7 @@
 import Resource from '../models/Resource.js';
 import Group from '../models/Group.js';
-import { getFileUrl } from '../middleware/upload.middleware.js';
-import path from 'path';
+import { isTrustedCloudinaryUrl, sanitizePublicId } from '../middleware/upload.middleware.js';
+import { deleteStoredFile } from '../middleware/upload.middleware.js';
 
 const getFileType = (mimetype) => {
   if (mimetype === 'application/pdf') return 'pdf';
@@ -11,7 +11,8 @@ const getFileType = (mimetype) => {
   return 'other';
 };
 
-// ─── Upload resource (general when no groupId) ─────────────────────
+// ─── Upload resource ─────────────────────────────────────────────────
+// السيرفر يستقبل JSON فقط (fileUrl من Cloudinary) — لا multipart، لا multer
 export const uploadResource = async (req, res) => {
   try {
     const { title, description, groupId, category } = req.body;
@@ -19,9 +20,27 @@ export const uploadResource = async (req, res) => {
     if (!title) {
       return res.status(400).json({ message: 'العنوان مطلوب' });
     }
-    if (!req.file) {
-      return res.status(400).json({ message: 'يرجى رفع ملف' });
+
+    // التحقق من أن الرابط يخص Cloudinary الخاصة بنا
+    if (!req.body?.fileUrl || !isTrustedCloudinaryUrl(req.body.fileUrl)) {
+      return res.status(400).json({ message: 'رابط الملف غير صالح أو مصدره غير موثوق' });
     }
+
+    const directFile = {
+      url: req.body.fileUrl,
+      publicId: sanitizePublicId(req.body.filePublicId),
+      resourceType:
+        typeof req.body.fileResourceType === 'string'
+          ? req.body.fileResourceType.slice(0, 20)
+          : undefined,
+      name:
+        typeof req.body.fileName === 'string'
+          ? req.body.fileName.slice(0, 200)
+          : 'ملف مرفوع',
+      size: Number(req.body.fileSize) > 0 ? Math.min(Number(req.body.fileSize), 100 * 1024 * 1024) : undefined,
+      mimeType:
+        typeof req.body.mimeType === 'string' ? req.body.mimeType.slice(0, 100) : undefined,
+    };
 
     // موارد المجموعات: تحقق الملكية — الموارد العامة: معلم/أدمن فقط (المسار محمي)
     let group = null;
@@ -36,16 +55,21 @@ export const uploadResource = async (req, res) => {
       }
     }
 
+    const fileMime = directFile.mimeType || 'application/octet-stream';
+
     const resource = await Resource.create({
       title: title.trim().substring(0, 200),
       description: description?.trim()?.substring(0, 500) || '',
       group: groupId || undefined,
       uploadedBy: req.user._id,
-      fileUrl: getFileUrl(req, req.file.path),
-      fileName: req.file.originalname,
-      fileType: getFileType(req.file.mimetype),
-      fileSize: req.file.size,
-      mimeType: req.file.mimetype,
+      fileUrl: directFile.url,
+      filePublicId: directFile.publicId || undefined,
+      fileResourceType: directFile.resourceType || undefined,
+      storageProvider: 'cloudinary',
+      fileName: directFile.name,
+      fileType: getFileType(fileMime),
+      fileSize: directFile.size,
+      mimeType: fileMime,
       category: category || 'other',
     });
 
@@ -68,7 +92,6 @@ export const getGroupResources = async (req, res) => {
     const group = await Group.findById(groupId).select('teacher students');
     if (!group) return res.status(404).json({ message: 'المجموعة غير موجودة' });
 
-    // Verify membership
     const isTeacher = group.teacher?.toString() === req.user._id.toString();
     const isStudent = group.students.some(s => s.toString() === req.user._id.toString());
     const isAdmin = req.user.role === 'admin';
@@ -91,7 +114,6 @@ export const getGroupResources = async (req, res) => {
 };
 
 // ─── Get general library (no group) ─────────────────────────────────
-// متاحة للمعلم/الأدمن دائماً، وللطالب المحدد مستواه والمسدد اشتراكه فقط
 export const getGeneralResources = async (req, res) => {
   try {
     const { category } = req.query;
@@ -137,7 +159,7 @@ export const deleteResource = async (req, res) => {
     const resource = await Resource.findById(req.params.id);
     if (!resource) return res.status(404).json({ message: 'المورد غير موجود' });
 
-    // الموارد العامة يديرها أي معلم/أدمن (المسار محمي)، وموارد المجموعات لمعلمها أو الأدمن
+    // الموارد العامة يديرها أي معلم/أدمن، وموارد المجموعات لمعلمها أو الأدمن
     if (resource.group) {
       const group = await Group.findById(resource.group).select('teacher');
       const isTeacher = group?.teacher?.toString() === req.user._id.toString();
@@ -149,6 +171,16 @@ export const deleteResource = async (req, res) => {
 
     resource.isActive = false;
     await resource.save();
+
+    // حذف الملف من Cloudinary (best-effort)
+    try {
+      await deleteStoredFile({
+        url: resource.fileUrl,
+        publicId: resource.filePublicId,
+        resourceType: resource.fileResourceType,
+      });
+    } catch (_) {}
+
     res.json({ message: 'تم حذف المورد' });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في حذف المورد' });
