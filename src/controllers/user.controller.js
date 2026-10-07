@@ -254,6 +254,21 @@ export const resetUserPassword = async (req, res) => {
     if (user.role === 'admin' && req.user._id.toString() !== user._id.toString()) {
       return res.status(403).json({ message: 'لا يمكن تعيين كلمة مرور لأدمن آخر' });
     }
+
+    const customPassword = req.body?.password;
+    if (customPassword) {
+      if (typeof customPassword !== 'string' || customPassword.length < 6) {
+        return res.status(400).json({ message: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' });
+      }
+      user.password = customPassword;
+      user.resetToken = undefined;
+      user.resetTokenExpires = undefined;
+      await user.save();
+      return res.json({
+        message: `تم تحديث كلمة المرور لـ ${user.firstName} ${user.lastName} بنجاح`,
+      });
+    }
+
     const tempPassword = crypto.randomBytes(4).toString('hex'); // 8 أحرف
     user.password = tempPassword;
     user.resetToken = undefined;

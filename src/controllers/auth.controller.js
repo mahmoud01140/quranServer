@@ -217,3 +217,38 @@ export const updatePushSubscription = async (req, res) => {
     res.status(500).json({ message: 'خطأ' });
   }
 };
+
+// PUT /api/auth/change-password
+export const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ message: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل' });
+    }
+
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) {
+      return res.status(404).json({ message: 'المستخدم غير موجود' });
+    }
+
+    // إذا تم تقديم كلمة المرور الحالية نتحقق منها، وإن كان غير أدمن فلابد من تقديمها
+    if (currentPassword) {
+      const isMatch = await user.comparePassword(currentPassword);
+      if (!isMatch) {
+        return res.status(400).json({ message: 'كلمة المرور الحالية غير صحيحة' });
+      }
+    } else if (user.role !== 'admin') {
+      return res.status(400).json({ message: 'يرجى إدخال كلمة المرور الحالية' });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: 'تم تغيير كلمة المرور بنجاح' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ message: 'حدث خطأ أثناء تغيير كلمة المرور' });
+  }
+};
+
