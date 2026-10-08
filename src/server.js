@@ -34,6 +34,7 @@ import reportsRoutes from './routes/reports.routes.js';
 import dailyTaskRoutes from './routes/dailyTask.routes.js';
 import surveyRoutes from './routes/survey.routes.js';
 import maintenanceRoutes from './routes/maintenance.routes.js';
+import scheduleRoutes from './routes/schedule.routes.js';
 
 
 // Parse allowed origins (supports comma-separated CLIENT_URL for multiple domains)
@@ -147,6 +148,7 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/daily-tasks', dailyTaskRoutes);
 app.use('/api/survey', surveyRoutes);
 app.use('/api/maintenance', maintenanceRoutes);
+app.use('/api/schedule', scheduleRoutes);
 
 
 // Health check
