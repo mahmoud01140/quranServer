@@ -222,6 +222,10 @@ export const bookStudentSchedule = async (req, res) => {
     student.scheduleDays = days;
     student.sessionTime = sessionTime;
     student.placementExamTaken = true; // تم الامتحان وجدولة الموعد
+    student.isApproved = true; // اعتماد فوري وتلقائي لنقل الطالب للجدول النشط
+    if (!student.assignedLevel) {
+      student.assignedLevel = 'foundation';
+    }
     await student.save();
 
     // تجهيز رابط الواتساب لخدمة العملاء
