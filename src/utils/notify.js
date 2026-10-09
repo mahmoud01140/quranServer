@@ -81,7 +81,12 @@ export const notifyUser = async ({ recipient, type, title, body, data, push = tr
   if (push) {
     try {
       const sub = await resolveSubscription(recipient, pushSubscription);
-      if (sub) await sendWebPush(sub, title, body, data);
+      if (sub) {
+        const sent = await sendWebPush(sub, title, body, data);
+        if (sent === false && !pushSubscription && recipient) {
+          User.findByIdAndUpdate(recipient, { $unset: { pushSubscription: 1 } }).catch(() => {});
+        }
+      }
     } catch (_) {}
   }
   return notif;
@@ -120,10 +125,14 @@ export const notifyMany = async (items) => {
   await Promise.allSettled(
     allowed
       .filter((i) => i.push)
-      .map((i) => {
-        const sub = i.pushSubscription || subMap.get(i.recipient?.toString?.() || i.recipient) || null;
-        if (!sub) return Promise.resolve();
-        return sendWebPush(sub, i.title, i.body, i.data);
+      .map(async (i) => {
+        const recipientId = i.recipient?.toString?.() || i.recipient;
+        const sub = i.pushSubscription || subMap.get(recipientId) || null;
+        if (!sub) return;
+        const sent = await sendWebPush(sub, i.title, i.body, i.data);
+        if (sent === false && !i.pushSubscription && recipientId) {
+          User.findByIdAndUpdate(recipientId, { $unset: { pushSubscription: 1 } }).catch(() => {});
+        }
       })
   );
 

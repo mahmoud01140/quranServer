@@ -133,3 +133,36 @@ export const updateNotificationSettings = async (req, res) => {
     res.status(500).json({ message: 'خطأ في حفظ إعدادات التنبيهات' });
   }
 };
+
+// POST /api/notifications/test-push
+export const testPushNotification = async (req, res) => {
+  try {
+    const { default: User } = await import('../models/User.js');
+    const { sendWebPush } = await import('../utils/webpush.js');
+    const user = await User.findById(req.user._id).select('pushSubscription');
+
+    if (!user || !user.pushSubscription) {
+      return res.status(400).json({
+        message: 'لا يوجد اشتراك إشعارات مسجل لهذا المتصفح. اضغط على تفعيل الإشعارات أولاً.',
+      });
+    }
+
+    const sent = await sendWebPush(
+      user.pushSubscription,
+      '🔔 تجربة إشعارات منصة التحفيظ',
+      'إشعارات المتصفح الفورية تعمل بنجاح وعلى أكمل وجه!',
+      { url: '/' }
+    );
+
+    if (!sent) {
+      return res.status(500).json({
+        message: 'تعذر إرسال الإشعار. تأكد من إعداد مفاتيح VAPID على الخادم وصحة اشتراك المتصفح.',
+      });
+    }
+
+    res.json({ message: 'تم إرسال إشعار التجربة بنجاح للمتصفح!' });
+  } catch (error) {
+    res.status(500).json({ message: error.message || 'خطأ أثناء إرسال إشعار التجربة' });
+  }
+};
+

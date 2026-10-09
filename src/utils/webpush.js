@@ -1,28 +1,44 @@
 import webpush from 'web-push';
 import NotificationSetting from '../models/NotificationSetting.js';
 
-// Scaffolded — configure VAPID keys in production
-const isConfigured = process.env.VAPID_PUBLIC_KEY && 
-  process.env.VAPID_PRIVATE_KEY && 
-  process.env.VAPID_PUBLIC_KEY !== 'placeholder_public_key';
+const cleanStr = (val) => (val || '').trim().replace(/^["']|["']$/g, '');
 
-if (isConfigured) {
-  webpush.setVapidDetails(
-    process.env.VAPID_EMAIL || 'mailto:admin@quran-platform.com',
-    process.env.VAPID_PUBLIC_KEY,
-    process.env.VAPID_PRIVATE_KEY
-  );
-}
+let isVapidConfigured = false;
 
-export const sendWebPush = async (subscription, title, body, data = {}) => {
-  if (!isConfigured || !subscription) {
-    console.log(`[WebPush SCAFFOLD] Would send: ${title} - ${body}`);
-    return;
+export const ensureVapidConfigured = () => {
+  const publicKey = cleanStr(process.env.VAPID_PUBLIC_KEY);
+  const privateKey = cleanStr(process.env.VAPID_PRIVATE_KEY);
+  const email = cleanStr(process.env.VAPID_EMAIL) || 'mailto:admin@quran-platform.com';
+
+  if (!publicKey || !privateKey || publicKey === 'placeholder_public_key') {
+    return false;
   }
 
-  // Global backstop: when the admin pauses ALL notifications, no push
-  // leaves the server — even from call sites that predate the dispatcher.
-  // (Per-category gating lives in utils/notify.js; DB reads are untouched.)
+  try {
+    webpush.setVapidDetails(email, publicKey, privateKey);
+    isVapidConfigured = true;
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to configure WebPush VAPID details:', error.message);
+    isVapidConfigured = false;
+    return false;
+  }
+};
+
+// Auto-run on module load
+ensureVapidConfigured();
+
+export const sendWebPush = async (subscription, title, body, data = {}) => {
+  if (!isVapidConfigured && !ensureVapidConfigured()) {
+    console.log(`[WebPush SCAFFOLD] Would send: ${title} - ${body}`);
+    return false;
+  }
+
+  if (!subscription || !subscription.endpoint) {
+    return false;
+  }
+
+  // Global backstop: when the admin pauses ALL notifications, no push leaves the server
   try {
     const settings = await NotificationSetting.findOne().select('enabled').lean();
     if (settings && settings.enabled === false) return false;
@@ -33,21 +49,23 @@ export const sendWebPush = async (subscription, title, body, data = {}) => {
   const payload = JSON.stringify({
     title,
     body,
-    icon: '/logo.png',
-    badge: '/badge.png',
+    icon: '/quran-icon.svg',
+    badge: '/quran-icon.svg',
     data: { url: '/', ...data },
   });
 
   try {
     await webpush.sendNotification(subscription, payload);
+    return true;
   } catch (error) {
-    console.error('WebPush error:', error.statusCode, error.body);
-    // If subscription expired, return false so caller can clean it up
-    if (error.statusCode === 410) return false;
+    console.error('WebPush error:', error.statusCode, error.body || error.message);
+    // If subscription expired or not found, return false so caller can clean it up
+    if (error.statusCode === 410 || error.statusCode === 404) return false;
+    return false;
   }
-  return true;
 };
 
 export const getVapidPublicKey = () => {
-  return process.env.VAPID_PUBLIC_KEY || '';
+  return cleanStr(process.env.VAPID_PUBLIC_KEY);
 };
+
