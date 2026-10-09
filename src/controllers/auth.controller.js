@@ -53,20 +53,18 @@ export const register = async (req, res) => {
       const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
       const userLabel = `${user.firstName} ${user.lastName}`.trim() || 'مستخدم جديد';
       const roleLabel = user.role === 'parent' ? 'ولي أمر' : user.role === 'teacher' ? 'معلم' : 'طالب';
-      await Promise.allSettled(
-        admins.map(async (admin) => {
-          const notif = await Notification.create({
-            recipient: admin._id,
-            type: 'general',
-            title: `👤 مستخدم جديد: ${userLabel}`,
-            body: `سجّل ${roleLabel} جديد (${user.phone || user.email || 'بدون بيانات تواصل'}) — بانتظار المراجعة والاعتماد.`,
-            data: { userId: user._id.toString(), link: '/admin/users' },
-          });
-          if (admin.pushSubscription) {
-            await sendWebPush(admin.pushSubscription, notif.title, notif.body, notif.data);
-          }
-        })
-      );
+      const { notifyMany } = await import('../utils/notify.js');
+      await notifyMany(
+        admins.map((admin) => ({
+          recipient: admin._id,
+          type: 'general',
+          title: `👤 مستخدم جديد: ${userLabel}`,
+          body: `سجّل ${roleLabel} جديد (${user.phone || user.email || 'بدون بيانات تواصل'}) — بانتظار المراجعة والاعتماد.`,
+          data: { userId: user._id.toString(), link: '/admin/users' },
+          push: true,
+          pushSubscription: admin.pushSubscription || undefined,
+        }))
+      ).catch(() => {});
     } catch (_) {}
 
     const token = generateToken(user._id, user.role);

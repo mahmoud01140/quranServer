@@ -58,13 +58,10 @@ export const sendNotification = async (req, res) => {
     if (!ALLOWED_TYPES.includes(type)) {
       return res.status(400).json({ message: 'نوع الإشعار غير صالح' });
     }
-    const notification = await Notification.create({ recipient: recipientId, type, title, body, data });
+    // Central dispatcher honors the admin on/off switch (DB + push).
     // Frontend polls GET /notifications (Vercel-safe, no socket.io).
-
-    const recipient = await User.findById(recipientId).select('pushSubscription');
-    if (recipient?.pushSubscription) {
-      await sendWebPush(recipient.pushSubscription, title, body, data);
-    }
+    const { notifyUser } = await import('../utils/notify.js');
+    const notification = await notifyUser({ recipient: recipientId, type, title, body, data, push: true });
 
     res.json({ message: 'تم الإرسال', notification });
   } catch (error) {
@@ -80,16 +77,59 @@ export const sendGroupNotification = async (req, res) => {
     }
     const group = await Group.findById(req.params.groupId).populate('students', 'pushSubscription');
 
-    const notifs = await Promise.all(
-      group.students.map(async (student) => {
-        const notif = await Notification.create({ recipient: student._id, type, title, body, data });
-        if (student.pushSubscription) await sendWebPush(student.pushSubscription, title, body, data);
-        return notif;
-      })
+    const { notifyMany } = await import('../utils/notify.js');
+    const notifs = await notifyMany(
+      group.students.map((student) => ({
+        recipient: student._id,
+        type,
+        title,
+        body,
+        data,
+        push: true,
+        pushSubscription: student.pushSubscription || undefined,
+      }))
     );
 
     res.json({ message: `تم الإرسال لـ ${notifs.length} طالب`, count: notifs.length });
   } catch (error) {
     res.status(500).json({ message: 'خطأ' });
+  }
+};
+
+// ─── Admin notification switch ────────────────────────────────────
+// GET /api/notifications/settings (admin) — master + per-category toggles
+export const getNotificationSettings = async (req, res) => {
+  try {
+    const { default: NotificationSetting } = await import('../models/NotificationSetting.js');
+    const settings = await NotificationSetting.getSettings();
+    res.json({ settings });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في جلب إعدادات التنبيهات' });
+  }
+};
+
+// PUT /api/notifications/settings (admin)
+export const updateNotificationSettings = async (req, res) => {
+  try {
+    const { default: NotificationSetting } = await import('../models/NotificationSetting.js');
+    const { invalidateNotificationSettingsCache } = await import('../utils/notify.js');
+    const settings = await NotificationSetting.getSettings();
+
+    if (req.body.enabled !== undefined) {
+      settings.enabled = Boolean(req.body.enabled);
+    }
+    if (req.body.categories && typeof req.body.categories === 'object') {
+      const allowed = ['live', 'exams', 'payments', 'discussion', 'general'];
+      for (const key of allowed) {
+        if (req.body.categories[key] !== undefined) {
+          settings.categories[key] = Boolean(req.body.categories[key]);
+        }
+      }
+    }
+    await settings.save();
+    invalidateNotificationSettingsCache();
+    res.json({ message: 'تم حفظ إعدادات التنبيهات', settings });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في حفظ إعدادات التنبيهات' });
   }
 };

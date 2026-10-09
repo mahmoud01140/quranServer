@@ -332,15 +332,15 @@ export const approveUser = async (req, res) => {
 
     // Send notification (DB + Web Push; frontend polls — no socket.io)
     const scheduleDesc = (user.scheduleDays?.length ? `أيامك: ${user.scheduleDays.join('، ')}` : '') + (user.sessionTime ? ` الساعة ${user.sessionTime}` : '');
-    const notification = await Notification.create({
+    const { notifyUser } = await import('../utils/notify.js');
+    await notifyUser({
       recipient: user._id,
       type: 'general',
       title: 'تم اعتماد حسابك وجدولة مواعيدك بنجاح ✅',
       body: `مرحباً ${user.firstName}! تم اعتماد مستواك ومواعيدك للبث المباشر الفردي. ${scheduleDesc}`,
-    });
-    if (user.pushSubscription) {
-      await sendWebPush(user.pushSubscription, notification.title, notification.body);
-    }
+      push: true,
+      pushSubscription: user.pushSubscription || undefined,
+    }).catch(() => {});
 
     res.json({ message: 'تم قبول الطالب وتحديد مستواه ومواعيده', user });
   } catch (error) {

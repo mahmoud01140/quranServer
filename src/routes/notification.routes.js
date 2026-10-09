@@ -2,6 +2,7 @@ import express from 'express';
 import {
   getNotifications, markAsRead, markAllAsRead,
   deleteNotification, sendNotification, sendGroupNotification,
+  getNotificationSettings, updateNotificationSettings,
 } from '../controllers/notification.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 import { adminOnly, teacherOnly } from '../middleware/role.middleware.js';
@@ -15,5 +16,7 @@ router.put('/read-all', markAllAsRead);
 router.delete('/:id', deleteNotification);
 router.post('/send', adminOnly, sendNotification);
 router.post('/send-group/:groupId', teacherOnly, sendGroupNotification);
+router.get('/settings', adminOnly, getNotificationSettings);
+router.put('/settings', adminOnly, updateNotificationSettings);
 
 export default router;

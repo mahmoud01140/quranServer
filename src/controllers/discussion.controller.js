@@ -81,33 +81,23 @@ export const sendStudentMessage = async (req, res) => {
 
     await thread.save();
 
-    // Notify admins (DB + Web Push for instant delivery)
+    // Notify admins (DB + Web Push; dispatcher honors admin switch)
     try {
       const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
       const studentName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'طالب';
       const preview = content.trim().substring(0, 120);
-      const notifs = admins.map(admin => ({
-        recipient: admin._id,
-        type: 'discussion_reply',
-        title: `💬 رسالة جديدة من الطالب: ${studentName}`,
-        body: preview,
-        data: { studentId: studentId.toString(), link: '/admin/discussions' },
-      }));
-      if (notifs.length > 0) {
-        await Notification.insertMany(notifs);
-      }
-      await Promise.allSettled(
-        admins
-          .filter(a => a.pushSubscription)
-          .map(a =>
-            sendWebPush(
-              a.pushSubscription,
-              `💬 رسالة جديدة من الطالب: ${studentName}`,
-              preview,
-              { studentId: studentId.toString(), link: '/admin/discussions' }
-            )
-          )
-      );
+      const { notifyMany } = await import('../utils/notify.js');
+      await notifyMany(
+        admins.map(admin => ({
+          recipient: admin._id,
+          type: 'discussion_reply',
+          title: `💬 رسالة جديدة من الطالب: ${studentName}`,
+          body: preview,
+          data: { studentId: studentId.toString(), link: '/admin/discussions' },
+          push: true,
+          pushSubscription: admin.pushSubscription || undefined,
+        }))
+      ).catch(() => {});
     } catch (notifErr) {
       console.warn('Could not dispatch admin notification:', notifErr.message);
     }
@@ -264,15 +254,18 @@ export const sendAdminReply = async (req, res) => {
 
     await thread.save();
 
-    // Create Notification for Student
+    // Create Notification for Student (dispatcher honors admin switch;
+    // push stays off here exactly as before — bell/polling delivery only)
     try {
-      await Notification.create({
+      const { notifyUser } = await import('../utils/notify.js');
+      await notifyUser({
         recipient: studentId,
         type: 'discussion_reply',
         title: 'رد جديد من إدارة المنصة 💬',
         body: content.trim().substring(0, 120),
         data: { discussionId: thread._id.toString() },
-      });
+        push: false,
+      }).catch(() => {});
     } catch (notifErr) {
       console.warn('Could not dispatch student notification:', notifErr.message);
     }

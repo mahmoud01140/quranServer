@@ -55,13 +55,15 @@ export const evaluateUserSubscription = async (user) => {
       const lastSent = sub.lastReminderSentAt ? new Date(sub.lastReminderSentAt) : null;
       const hoursSinceLast = lastSent ? (now - lastSent) / (1000 * 60 * 60) : 999;
       if (hoursSinceLast > 24) {
-        await Notification.create({
+        const { notifyUser } = await import('../utils/notify.js');
+        await notifyUser({
           recipient: user._id,
           type: 'plan_updated',
           title: 'تنبيه باقتراب موعد سداد الاشتراك الشهري ⚠️',
           body: `يتبقى ${daysRemaining} ${daysRemaining === 1 ? 'يوم' : daysRemaining === 2 ? 'يومان' : 'أيام'} على انتهاء اشتراكك في الحلقات. يرجى التجديد عبر فودافون كاش أو انستاباي لضمان استمرار حضورك دون انقطاع.`,
           data: { link: '/student/subscription', daysRemaining },
-        });
+          push: false,
+        }).catch(() => {});
         sub.lastReminderSentAt = now;
         isModified = true;
       }
@@ -261,27 +263,24 @@ export const submitPaymentRequest = async (req, res) => {
       status: 'pending',
     });
 
-    // Notify all admins about new payment request (DB + Web Push for instant delivery)
+    // Notify all admins about new payment request (DB + Web Push; dispatcher honors admin switch)
     const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
     const payerName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'طالب';
     const payTitle = 'طلب سداد واشتراك جديد 💳';
     const payBody = `قام الطالب ${payerName} بتقديم إيصال تحويل بقيمة ${payment.amount} ${currency} عبر ${method === 'vodafone_cash' ? 'فودافون كاش' : 'انستاباي'}.`;
     const payData = { paymentId: payment._id, userId: req.user._id, method, amount: payment.amount, link: '/admin/payments' };
-    const notificationPromises = admins.map(admin =>
-      Notification.create({
+    const { notifyMany } = await import('../utils/notify.js');
+    await notifyMany(
+      admins.map(admin => ({
         recipient: admin._id,
         type: 'payment_submitted',
         title: payTitle,
         body: payBody,
         data: payData,
-      })
-    );
-    await Promise.all(notificationPromises);
-    await Promise.allSettled(
-      admins
-        .filter(a => a.pushSubscription)
-        .map(a => sendWebPush(a.pushSubscription, payTitle, payBody, payData))
-    );
+        push: true,
+        pushSubscription: admin.pushSubscription || undefined,
+      }))
+    ).catch(() => {});
 
     // Admins poll GET /payments lists (Vercel-safe, no socket.io).
 
@@ -461,14 +460,16 @@ export const approvePaymentAdmin = async (req, res) => {
     };
     await user.save();
 
-    // Create notification for student
-    await Notification.create({
+    // Create notification for student (dispatcher honors admin switch)
+    const { notifyUser } = await import('../utils/notify.js');
+    await notifyUser({
       recipient: user._id,
       type: 'payment_approved',
       title: 'تم اعتماد اشتراكك وتفعيل صلاحياتك بنجاح! 🎉',
       body: `تمت الموافقة على سداد الاشتراك وتفعيل حسابك لمدة ${durationDays} يوماً حتى ${endDate.toLocaleDateString('ar-EG')}. يمكنك الآن حضور حصصك المباشرة بحرية.`,
       data: { paymentId: payment._id, endDate },
-    });
+      push: false,
+    }).catch(() => {});
 
     // Student sees status via GET /payments/my-history polling (no socket.io).
 
@@ -519,13 +520,15 @@ export const activateSubscriptionManually = async (req, res) => {
     };
     await user.save();
 
-    await Notification.create({
+    const { notifyUser } = await import('../utils/notify.js');
+    await notifyUser({
       recipient: user._id,
       type: 'payment_approved',
       title: 'تم تفعيل اشتراكك من الإدارة! 🎉',
       body: `فعّلت الإدارة اشتراكك لمدة ${durationDays} يوماً حتى ${endDate.toLocaleDateString('ar-EG')}. يمكنك الآن حضور حصصك بحرية.`,
       data: { endDate },
-    });
+      push: false,
+    }).catch(() => {});
 
     // Student sees status via GET /payments/my-history polling (no socket.io).
 
@@ -565,14 +568,16 @@ export const rejectPaymentAdmin = async (req, res) => {
     if (notes) payment.notes = notes;
     await payment.save();
 
-    // Create notification for student
-    await Notification.create({
+    // Create notification for student (dispatcher honors admin switch)
+    const { notifyUser } = await import('../utils/notify.js');
+    await notifyUser({
       recipient: payment.user,
       type: 'payment_rejected',
       title: 'تنبيه بخصوص إيصال التحويل ⚠️',
       body: `تعذر اعتماد إيصال التحويل للسبب التالي: "${payment.rejectionReason}". يمكنك تقديم إيصال صحيح أو التواصل مع الدعم الفني.`,
       data: { paymentId: payment._id, reason: payment.rejectionReason },
-    });
+      push: false,
+    }).catch(() => {});
 
     // Student sees rejection via GET /payments/my-history + notifications polling (no socket.io).
 

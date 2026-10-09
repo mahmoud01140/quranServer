@@ -175,15 +175,16 @@ export const linkChild = async (req, res) => {
     parent.children.push(child._id);
     await parent.save();
 
-    // Create a notification for the student
+    // Create a notification for the student (dispatcher honors admin switch)
     try {
-      const Notification = (await import('../models/Notification.js')).default;
-      await Notification.create({
+      const { notifyUser } = await import('../utils/notify.js');
+      await notifyUser({
         recipient: child._id,
         type: 'general',
         title: 'تم ربط حسابك بولي أمر 👨‍👩‍👧',
         body: `قام ولي الأمر (${parent.firstName} ${parent.lastName}) بربط حسابك لمتابعة أدائك في الحلقات والورد القرآني.`,
-        data: { parentId: parent._id }
+        data: { parentId: parent._id },
+        push: false,
       });
     } catch (notifErr) {
       console.warn('Could not send student linking notification:', notifErr.message);

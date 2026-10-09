@@ -4,6 +4,7 @@ import Group from '../models/Group.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { sendWebPush } from '../utils/webpush.js';
+import { notifyUser, notifyMany, isNotificationAllowed } from '../utils/notify.js';
 import { evaluateUserSubscription } from './payment.controller.js';
 
 export const getSecureLiveRoomName = (sessionId) => {
@@ -78,22 +79,17 @@ export const getDueSessions = async (req, res) => {
           if (t?.pushSubscription) staffPush.set(teacherId, t.pushSubscription);
         }
 
-        const created = await Promise.all(
-          [...recipients].map((rid) =>
-            Notification.create({
-              recipient: rid,
-              type: 'session_due',
-              title,
-              body,
-              data: { sessionId: s._id.toString(), link: '/admin/live' },
-            })
-          )
-        );
-        await Promise.allSettled(
-          [...staffPush.values()].map((sub) =>
-            sendWebPush(sub, title, body, { sessionId: s._id.toString(), link: '/admin/live' })
-          )
-        );
+        const created = await notifyMany(
+          [...recipients].map((rid) => ({
+            recipient: rid,
+            type: 'session_due',
+            title,
+            body,
+            data: { sessionId: s._id.toString(), link: '/admin/live' },
+            push: true,
+            pushSubscription: staffPush.get(rid) || undefined,
+          }))
+        ).catch(() => []);
         created.forEach((n) => notifiedIds.push(n._id.toString()));
       } catch (_) {}
 
@@ -198,16 +194,16 @@ export const createSession = async (req, res) => {
     // Notify group students (DB + Web Push; frontend picks up via HTTP polling — Vercel-safe)
     const group = await Group.findById(groupId).populate('students', 'pushSubscription firstName');
 
-    const notifications = group.students.map(student =>
-      Notification.create({
+    await notifyMany(
+      group.students.map(student => ({
         recipient: student._id,
         type: 'live_starting',
         title: `📅 جلسة مجدولة: ${title}`,
         body: `تم تحديد جلسة بتاريخ ${new Date(scheduledAt).toLocaleDateString('ar')}`,
         data: { sessionId: session._id },
-      })
-    );
-    await Promise.all(notifications);
+        push: false,
+      }))
+    ).catch(() => {});
 
     const sessionObj = session.toObject ? session.toObject() : { ...session };
     sessionObj.liveRoomName = getSecureLiveRoomName(session._id);
@@ -355,7 +351,7 @@ export const startSession = async (req, res) => {
 
     // Send live notifications (group sessions only; individual notifies at creation)
     // Students discover the live session via GET /api/live/active/me polling (no socket.io).
-    if (session.group?._id) {
+    if (session.group?._id && (await isNotificationAllowed('live_starting').catch(() => true))) {
       const group = await Group.findById(session.group._id).populate('students', 'pushSubscription');
       await Promise.allSettled(
         (group?.students || []).map((student) =>
@@ -462,14 +458,16 @@ export const endSession = async (req, res) => {
             // Check if all lessons in customLessons are now completed!
             const allCompleted = plan.customLessons?.length > 0 && plan.customLessons.every(l => l.status === 'completed');
             if (allCompleted) {
-              const notifs = studentIds.map(stId => ({
-                recipient: stId,
-                type: 'plan_updated',
-                title: 'مبارك إتمام المنهج الدراسي بنجاح! 🎓🎉',
-                body: 'لقد أتمت مجموعتكم جميع دروس المنهج المقرر. استعد للاختبار الشامل النهائي والترقية للمستوى التالي!',
-                data: { groupId: targetGroupId, planId: plan._id, completed: true }
-              }));
-              await Notification.insertMany(notifs).catch(() => {});
+              await notifyMany(
+                studentIds.map(stId => ({
+                  recipient: stId,
+                  type: 'plan_updated',
+                  title: 'مبارك إتمام المنهج الدراسي بنجاح! 🎓🎉',
+                  body: 'لقد أتمت مجموعتكم جميع دروس المنهج المقرر. استعد للاختبار الشامل النهائي والترقية للمستوى التالي!',
+                  data: { groupId: targetGroupId, planId: plan._id, completed: true },
+                  push: false,
+                }))
+              ).catch(() => {});
             }
           }
         }
@@ -547,13 +545,14 @@ export const joinSession = async (req, res) => {
             }
           } else if ((consumed.subscription?.trialSessionsAttended || 0) === 1) {
             // أول استهلاك للتجربة: إشعار ترحيبي مرة واحدة
-            await Notification.create({
+            await notifyUser({
               recipient: user._id,
               type: 'plan_updated',
               title: '🎉 حضرت جلستك التجريبية المجانية الأولى بنجاح!',
               body: 'أهلاً بك في منصتنا! للاستمرار في حضور الحصص القادمة مع معلمك، يرجى تفعيل اشتراكك الشهري عبر فودافون كاش أو انستاباي.',
               data: { link: '/student/subscription', trialCompleted: true },
-            });
+              push: false,
+            }).catch(() => {});
           }
         }
 
@@ -684,26 +683,18 @@ export const startGroupLiveSession = async (req, res) => {
       startedAt: new Date(),
     });
 
-    // Send notifications to group students
-    const notifications = group.students.map(student =>
-      Notification.create({
+    // Send notifications to group students (dispatcher honors admin switch)
+    await notifyMany(
+      group.students.map(student => ({
         recipient: student._id,
         type: 'live_starting',
         title: `🔴 حصة مباشرة الآن: ${group.name}`,
         body: 'انضم للحصة المباشرة مع المعلم',
         data: { sessionId: session._id, groupId: group._id, roomId: group.liveRoomId },
-      })
-    );
-    await Promise.all(notifications);
-
-    // Send push notifications
-    await Promise.allSettled(
-      group.students.map((student) =>
-        student.pushSubscription
-          ? sendWebPush(student.pushSubscription, `🔴 حصة مباشرة الآن!`, `انضم لحصة ${group.name} المباشرة`)
-          : Promise.resolve()
-      )
-    );
+        push: true,
+        pushSubscription: student.pushSubscription || undefined,
+      }))
+    ).catch(() => {});
 
     const sessionObj = session.toObject ? session.toObject() : { ...session };
     sessionObj.liveRoomName = getSecureLiveRoomName(session._id);
@@ -877,21 +868,15 @@ export const saveAttendanceSheet = async (req, res) => {
         if (matchingChildId) {
           const childName = studentNameMap.get(matchingChildId.toString()) || 'ابنكم';
           
-          await Notification.create({
+          await notifyUser({
             recipient: parent._id,
             type: 'progress_update',
             title: `⚠️ تنبيه غياب: ${childName}`,
             body: `نحيطكم علماً بأن الطالب ${childName} تم تسجيله غائباً عن الحصة المباشرة (${session.title}) اليوم.`,
-            data: { sessionId: session._id, childId: matchingChildId }
-          });
-
-          if (parent.pushSubscription) {
-            sendWebPush(
-              parent.pushSubscription,
-              `⚠️ تنبيه غياب: ${childName}`,
-              `تم تسجيل غياب ${childName} عن حصة اليوم (${session.title})`
-            ).catch(() => {});
-          }
+            data: { sessionId: session._id, childId: matchingChildId },
+            push: true,
+            pushSubscription: parent.pushSubscription || undefined,
+          }).catch(() => {});
           parentsNotifiedCount++;
         }
       }
@@ -1148,17 +1133,15 @@ export const startStudentLiveSession = async (req, res) => {
     await plan.save();
 
     // Notify student via DB + Web Push (student polls GET /api/live/active/me — no socket.io)
-    const notification = await Notification.create({
+    await notifyUser({
       recipient: studentId,
       type: 'live_starting',
       title: 'بدأ البث المباشر معك الآن 🎙️',
       body: `المشرف في انتظارك داخل غرفة البث المباشر: ${lessonTitle}`,
       data: { sessionId: session._id, link: '/student/live' },
-    });
-
-    if (student.pushSubscription) {
-      sendWebPush(student.pushSubscription, notification.title, notification.body).catch(() => {});
-    }
+      push: true,
+      pushSubscription: student.pushSubscription || undefined,
+    }).catch(() => {});
 
     const sessionObj = session.toObject ? session.toObject() : { ...session };
     sessionObj.liveRoomName = getSecureLiveRoomName(session._id);

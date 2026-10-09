@@ -236,28 +236,32 @@ export const createExam = async (req, res) => {
     examData.totalPoints = (examData.questions || []).reduce((sum, q) => sum + (q.points || 1), 0);
     const exam = await Exam.create(examData);
 
-    // Send notifications to students (DB; frontend polls GET /notifications — no socket.io)
+    // Send notifications to students (DB only — same as before; frontend polls).
+    // Routed via dispatcher so the admin on/off switch applies.
+    const { notifyMany } = await import('../utils/notify.js');
+    const examNotifs = [];
     if (targetType === 'individual' && targetStudent) {
-      await Notification.create({
+      examNotifs.push({
         recipient: targetStudent,
         type: 'exam',
         title: `🎯 تم إسناد امتحان فردي خاص بك: ${exam.title}`,
         body: 'أعد لك المعلم امتحاناً فردياً للمتابعة وتثبيت المحفوظ. تفضل بأدائه في قسم المطلوب منك.',
         data: { examId: exam._id, link: `/student/exams/${exam._id}/take` },
+        push: false,
       });
     } else if (targetType === 'group' && group) {
       const groupDoc = await Group.findById(group).select('students');
       if (groupDoc && groupDoc.students?.length) {
-        const notifs = groupDoc.students.map(sId =>
-          Notification.create({
+        groupDoc.students.forEach(sId =>
+          examNotifs.push({
             recipient: sId,
             type: 'exam',
             title: `📝 امتحان جديد للمجموعة: ${exam.title}`,
             body: 'تم نشر امتحان جديد لمجموعتك، يرجى الدخول وأدائه.',
             data: { examId: exam._id, link: `/student/exams/${exam._id}/take` },
+            push: false,
           })
         );
-        await Promise.allSettled(notifs);
       }
     } else if (targetType === 'level') {
       const studentFilter = { role: 'student' };
@@ -266,17 +270,20 @@ export const createExam = async (req, res) => {
       }
       const students = await User.find(studentFilter).select('_id');
       if (students?.length) {
-        const notifs = students.map(s =>
-          Notification.create({
+        students.forEach(s =>
+          examNotifs.push({
             recipient: s._id,
             type: 'exam',
             title: `🏷️ امتحان مستوى جديد: ${exam.title}`,
             body: 'تم إدراج امتحان مستوى جديد في حسابك، يرجى أداء التقييم.',
             data: { examId: exam._id, link: `/student/exams/${exam._id}/take` },
+            push: false,
           })
         );
-        await Promise.allSettled(notifs);
       }
+    }
+    if (examNotifs.length > 0) {
+      await notifyMany(examNotifs).catch(() => {});
     }
 
     res.status(201).json({ message: 'تم إنشاء الامتحان بنجاح', exam });
@@ -323,7 +330,8 @@ export const assignExamToLesson = async (req, res) => {
     }
     await exam.save();
 
-    await Notification.create({
+    const { notifyUser } = await import('../utils/notify.js');
+    await notifyUser({
       recipient: studentId,
       type: 'exam',
       title: `تم إسناد امتحان لك: ${exam.title}`,
@@ -331,7 +339,8 @@ export const assignExamToLesson = async (req, res) => {
         ? `أُضيف الامتحان على حصة «${lessonTitle}» في خطتك. تجده في قسم المطلوب منك.`
         : 'أُسند لك امتحان جديد. تجده في قسم المطلوب منك.',
       data: { examId: exam._id, link: `/student/exams/${exam._id}/take` },
-    });
+      push: false,
+    }).catch(() => {});
     // Student discovers via GET /notifications + exams polling (Vercel-safe, no socket.io).
 
     const populated = await Exam.findById(exam._id)
@@ -559,13 +568,17 @@ const notifyStaffOfPendingReview = async (req, { studentId, examId, examTitle, i
       : '🎙️ تسجيلات تسميع بانتظار المراجعة';
     const body = `رفع الطالب ${student?.firstName || ''} ${student?.lastName || ''} تسجيلات صوتية لامتحان "${examTitle}". يرجى المراجعة خلال 24 ساعة.`;
     const targets = [...(teacherId ? [teacherId] : []), ...admins.map(a => a._id)];
-    await Promise.allSettled(targets.map(t => Notification.create({
-      recipient: t,
-      type: 'exam_scheduled',
-      title,
-      body,
-      data: { examId, studentId: studentId?.toString?.() || studentId },
-    })));
+    const { notifyMany } = await import('../utils/notify.js');
+    await notifyMany(
+      targets.map(t => ({
+        recipient: t,
+        type: 'exam_scheduled',
+        title,
+        body,
+        data: { examId, studentId: studentId?.toString?.() || studentId },
+        push: false,
+      }))
+    ).catch(() => {});
     // Teachers/admins poll GET /notifications (no socket.io).
   } catch (_) {}
 };
@@ -870,7 +883,8 @@ export const reviewOralResult = async (req, res) => {
     }
 
     // Notify student via DB + Web Push (frontend polls GET /notifications — no socket.io)
-    const notification = await Notification.create({
+    const { notifyUser } = await import('../utils/notify.js');
+    await notifyUser({
       recipient: result.student._id,
       type: 'result_ready',
       title: '📋 نتيجة تقييمك الشفهي جاهزة',
@@ -878,10 +892,9 @@ export const reviewOralResult = async (req, res) => {
         ? 'قام المشرف بمراجعة تلاوتك الشفهية وحدّث مستواك النهائي. اطلع على التوجيهات والنتيجة الآن.'
         : 'تمت مراجعة تقييمك الشفهي من قِبل المشرف. اطلع على الملاحظات والنتيجة الآن.',
       data: { resultId: result._id },
-    });
-    if (result.student.pushSubscription) {
-      await sendWebPush(result.student.pushSubscription, notification.title, notification.body);
-    }
+      push: true,
+      pushSubscription: result.student.pushSubscription || undefined,
+    }).catch(() => {});
 
     res.json({ message: 'تم حفظ المراجعة وتحديث النتيجة وإرسال الإشعار للطالب', result });
   } catch (error) {
