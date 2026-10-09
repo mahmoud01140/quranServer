@@ -115,6 +115,10 @@ const liveSessionSchema = new mongoose.Schema({
 
   chatMessages: { type: [chatMessageSchema], validate: maxArrayLength(500) },
 
+  // Due-session admin alert: set once when the scheduled time arrives
+  // (prevents repeat notifications on every poll).
+  dueNotifiedAt: { type: Date },
+
   // Roll-call ping state (HTTP polling — Vercel-safe, replaces socket.io attendance-ping)
   activePing: {
     pingId:         { type: String },

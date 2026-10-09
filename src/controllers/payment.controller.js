@@ -3,6 +3,7 @@ import PaymentSetting from '../models/PaymentSetting.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { getFileUrl, isTrustedCloudinaryUrl, sanitizePublicId } from '../middleware/upload.middleware.js';
+import { sendWebPush } from '../utils/webpush.js';
 
 // ─── Helper: Check and update user subscription status ─────────
 export const evaluateUserSubscription = async (user) => {
@@ -260,18 +261,27 @@ export const submitPaymentRequest = async (req, res) => {
       status: 'pending',
     });
 
-    // Notify all admins about new payment request
-    const admins = await User.find({ role: 'admin' }).select('_id');
+    // Notify all admins about new payment request (DB + Web Push for instant delivery)
+    const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
+    const payerName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'طالب';
+    const payTitle = 'طلب سداد واشتراك جديد 💳';
+    const payBody = `قام الطالب ${payerName} بتقديم إيصال تحويل بقيمة ${payment.amount} ${currency} عبر ${method === 'vodafone_cash' ? 'فودافون كاش' : 'انستاباي'}.`;
+    const payData = { paymentId: payment._id, userId: req.user._id, method, amount: payment.amount, link: '/admin/payments' };
     const notificationPromises = admins.map(admin =>
       Notification.create({
         recipient: admin._id,
         type: 'payment_submitted',
-        title: 'طلب سداد واشتراك جديد 💳',
-        body: `قام الطالب ${req.user.firstName} ${req.user.lastName} بتقديم إيصال تحويل بقيمة ${payment.amount} ${currency} عبر ${method === 'vodafone_cash' ? 'فودافون كاش' : 'انستاباي'}.`,
-        data: { paymentId: payment._id, userId: req.user._id, method, amount: payment.amount },
+        title: payTitle,
+        body: payBody,
+        data: payData,
       })
     );
     await Promise.all(notificationPromises);
+    await Promise.allSettled(
+      admins
+        .filter(a => a.pushSubscription)
+        .map(a => sendWebPush(a.pushSubscription, payTitle, payBody, payData))
+    );
 
     // Admins poll GET /payments lists (Vercel-safe, no socket.io).
 

@@ -2,7 +2,7 @@ import express from 'express';
 import {
   register, login, logout, getMe,
   forgotPassword, resetPassword,
-  updatePushSubscription, changePassword,
+  updatePushSubscription, changePassword, getVapidKey,
 } from '../controllers/auth.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 
@@ -14,6 +14,7 @@ router.post('/logout', protect, logout);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPassword);
 router.get('/me', protect, getMe);
+router.get('/vapid-key', getVapidKey);
 router.put('/change-password', protect, changePassword);
 router.put('/push-subscription', protect, updatePushSubscription);
 

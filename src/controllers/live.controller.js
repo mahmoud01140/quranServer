@@ -12,6 +12,105 @@ export const getSecureLiveRoomName = (sessionId) => {
   return `quran_${hash}`;
 };
 
+// ─── Due-session staff alerts ─────────────────────────────────────
+// GET /api/live/due (admin/teacher, polled ~every 60s)
+// Notifies ONCE per scheduled session when its time arrives (or is within
+// the upcoming window): DB notification + Web Push to the teacher + admins,
+// guarded by dueNotifiedAt with atomic claim so concurrent polls never duplicate.
+export const getDueSessions = async (req, res) => {
+  try {
+    if (!['admin', 'teacher'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'غير مصرح' });
+    }
+
+    const now = new Date();
+    const windowEnd = new Date(now.getTime() + 15 * 60 * 1000);
+    const candidates = await LiveSession.find({
+      status: 'scheduled',
+      scheduledAt: { $lte: windowEnd },
+      $or: [{ dueNotifiedAt: null }, { dueNotifiedAt: { $exists: false } }],
+    })
+      .select('title scheduledAt teacher student group')
+      .populate('teacher', 'firstName lastName')
+      .populate('student', 'firstName lastName')
+      .populate('group', 'name teacher')
+      .limit(20)
+      .lean();
+
+    const sessions = [];
+    const notifiedIds = [];
+
+    for (const s of candidates) {
+      // Atomic claim: only the first concurrent poll notifies
+      const claimed = await LiveSession.findOneAndUpdate(
+        {
+          _id: s._id,
+          $or: [{ dueNotifiedAt: null }, { dueNotifiedAt: { $exists: false } }],
+        },
+        { $set: { dueNotifiedAt: new Date() } },
+        { new: false }
+      ).select('_id');
+      if (!claimed) continue;
+
+      const teacherId = (s.teacher?._id || s.teacher)?.toString?.();
+      const groupTeacherId = (s.group?.teacher?._id || s.group?.teacher)?.toString?.();
+      const ownerName = s.student
+        ? `${s.student.firstName || ''} ${s.student.lastName || ''}`.trim()
+        : s.group?.name || '';
+      const title = `⏰ حان موعد حصة: ${s.title || 'جلسة مباشرة'}`;
+      const when = s.scheduledAt ? new Date(s.scheduledAt) : null;
+      const body = when && when <= now
+        ? `موعد حصة "${s.title || ''}" ${ownerName ? `مع ${ownerName} ` : ''}قد حان الآن — ابدأ البث.`
+        : `حصة "${s.title || ''}" ${ownerName ? `مع ${ownerName} ` : ''}تبدأ خلال دقائق — استعد للبث.`;
+
+      try {
+        const recipients = new Set();
+        if (teacherId) recipients.add(teacherId);
+        if (groupTeacherId) recipients.add(groupTeacherId);
+        const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
+        const staffPush = new Map();
+        for (const a of admins) {
+          recipients.add(a._id.toString());
+          if (a.pushSubscription) staffPush.set(a._id.toString(), a.pushSubscription);
+        }
+        if (teacherId && !staffPush.has(teacherId)) {
+          const t = await User.findById(teacherId).select('pushSubscription');
+          if (t?.pushSubscription) staffPush.set(teacherId, t.pushSubscription);
+        }
+
+        const created = await Promise.all(
+          [...recipients].map((rid) =>
+            Notification.create({
+              recipient: rid,
+              type: 'session_due',
+              title,
+              body,
+              data: { sessionId: s._id.toString(), link: '/admin/live' },
+            })
+          )
+        );
+        await Promise.allSettled(
+          [...staffPush.values()].map((sub) =>
+            sendWebPush(sub, title, body, { sessionId: s._id.toString(), link: '/admin/live' })
+          )
+        );
+        created.forEach((n) => notifiedIds.push(n._id.toString()));
+      } catch (_) {}
+
+      sessions.push({
+        sessionId: s._id.toString(),
+        title: s.title || 'جلسة مباشرة',
+        scheduledAt: s.scheduledAt,
+        ownerName,
+      });
+    }
+
+    res.json({ sessions, notifiedIds });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ في فحص مواعيد الحصص' });
+  }
+};
+
 // Vercel-safe polling helper: hide expired roll-call pings instead of pushing via socket.io.
 // Expired pings are nulled in the response (lazy cleanup; no extra DB write on hot read paths).
 const sanitizeActivePing = (sessionObj) => {

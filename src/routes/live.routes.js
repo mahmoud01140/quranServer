@@ -2,7 +2,7 @@ import express from 'express';
 import {
   getGroupSessions, createSession, getSessionById, getActiveSession, getMySessions,
   startSession, endSession, joinSession, leaveSession, sendChatMessage, getChatMessages, getAttendees,
-  startGroupLiveSession, startStudentLiveSession, checkStudentSubscription,
+  startGroupLiveSession, startStudentLiveSession, checkStudentSubscription, getDueSessions,
   // Live Attendance Sheet System
   getAttendanceSheet, saveAttendanceSheet, sendAttendancePing, respondAttendancePong,
   // Shared mushaf (HTTP polling)
@@ -23,6 +23,8 @@ const allowAdminOrTeacher = (req, res, next) => {
 // Student individual sessions & Group sessions
 router.get('/active/me', getActiveSession);
 router.get('/mine', getMySessions);
+// NOTE: /due must precede /:id so "due" isn't captured as a session id
+router.get('/due', getDueSessions);
 router.get('/student/:studentId/subscription-check', allowAdminOrTeacher, checkStudentSubscription);
 router.post('/student/:studentId/start', allowAdminOrTeacher, startStudentLiveSession);
 router.get('/group/:groupId', getGroupSessions);

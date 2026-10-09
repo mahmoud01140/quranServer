@@ -1,7 +1,9 @@
 import User, { normalizePhone } from '../models/User.js';
 import ExamResult from '../models/ExamResult.js';
+import Notification from '../models/Notification.js';
 import { generateToken, setTokenCookie, clearTokenCookie } from '../utils/jwt.js';
 import { sendPasswordResetEmail } from '../utils/email.js';
+import { getVapidPublicKey, sendWebPush } from '../utils/webpush.js';
 import crypto from 'crypto';
 
 // POST /api/auth/register
@@ -45,6 +47,27 @@ export const register = async (req, res) => {
       // Email verification removed permanently: accounts are active immediately.
       isVerified: true,
     });
+
+    // تنبيه الإدارة بمستخدم جديد (DB + Web Push — لا يفشل التسجيل أبداً)
+    try {
+      const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
+      const userLabel = `${user.firstName} ${user.lastName}`.trim() || 'مستخدم جديد';
+      const roleLabel = user.role === 'parent' ? 'ولي أمر' : user.role === 'teacher' ? 'معلم' : 'طالب';
+      await Promise.allSettled(
+        admins.map(async (admin) => {
+          const notif = await Notification.create({
+            recipient: admin._id,
+            type: 'general',
+            title: `👤 مستخدم جديد: ${userLabel}`,
+            body: `سجّل ${roleLabel} جديد (${user.phone || user.email || 'بدون بيانات تواصل'}) — بانتظار المراجعة والاعتماد.`,
+            data: { userId: user._id.toString(), link: '/admin/users' },
+          });
+          if (admin.pushSubscription) {
+            await sendWebPush(admin.pushSubscription, notif.title, notif.body, notif.data);
+          }
+        })
+      );
+    } catch (_) {}
 
     const token = generateToken(user._id, user.role);
     setTokenCookie(res, token);
@@ -204,6 +227,15 @@ export const resetPassword = async (req, res) => {
     res.json({ message: 'تم تغيير كلمة المرور بنجاح' });
   } catch (error) {
     res.status(500).json({ message: 'خطأ في إعادة التعيين' });
+  }
+};
+
+// GET /api/auth/vapid-key (public — the VAPID public key is public by design)
+export const getVapidKey = async (req, res) => {
+  try {
+    res.json({ key: getVapidPublicKey() || null });
+  } catch (error) {
+    res.status(500).json({ message: 'خطأ' });
   }
 };
 

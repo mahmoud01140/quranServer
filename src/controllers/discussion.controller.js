@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Discussion from '../models/Discussion.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import { sendWebPush } from '../utils/webpush.js';
 
 // ─── Student: Get My Conversation Thread with Admin ──────────────────
 export const getMyThread = async (req, res) => {
@@ -80,20 +81,33 @@ export const sendStudentMessage = async (req, res) => {
 
     await thread.save();
 
-    // Notify admins
+    // Notify admins (DB + Web Push for instant delivery)
     try {
-      const admins = await User.find({ role: 'admin' }).select('_id');
-      const studentName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim();
+      const admins = await User.find({ role: 'admin' }).select('_id pushSubscription');
+      const studentName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'طالب';
+      const preview = content.trim().substring(0, 120);
       const notifs = admins.map(admin => ({
         recipient: admin._id,
         type: 'discussion_reply',
-        title: `رسالة جديدة من الطالب: ${studentName}`,
-        body: content.trim().substring(0, 120),
-        data: { studentId: studentId.toString() },
+        title: `💬 رسالة جديدة من الطالب: ${studentName}`,
+        body: preview,
+        data: { studentId: studentId.toString(), link: '/admin/discussions' },
       }));
       if (notifs.length > 0) {
         await Notification.insertMany(notifs);
       }
+      await Promise.allSettled(
+        admins
+          .filter(a => a.pushSubscription)
+          .map(a =>
+            sendWebPush(
+              a.pushSubscription,
+              `💬 رسالة جديدة من الطالب: ${studentName}`,
+              preview,
+              { studentId: studentId.toString(), link: '/admin/discussions' }
+            )
+          )
+      );
     } catch (notifErr) {
       console.warn('Could not dispatch admin notification:', notifErr.message);
     }
